@@ -7,7 +7,10 @@ using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using Microsoft.OpenApi.Models;
+using OpenTelemetry.Exporter.Prometheus;
 using OpenTelemetry.Trace.Configuration;
+using OpenTelemetry.Metrics.Configuration;
+using OpenTelemetry.Exporter.Web;
 
 namespace API
 {
@@ -36,18 +39,36 @@ namespace API
                 }
             });
 
-            services.AddOpenTelemetry((sp, builder) =>
+
+
+            //services.AddOpenTelemetry((sp, builder) =>
+            //{
+            //    builder
+            //        .SetSampler(Samplers.AlwaysSample)
+            //        .UseApplicationInsights(telemetryConfiguration =>
+            //        {
+            //            var instrumentationKey = this.Configuration.GetValue<string>("ApplicationInsights:InstrumentationKey");
+            //            telemetryConfiguration.InstrumentationKey = instrumentationKey;
+            //        })
+            //        .AddRequestCollector()
+            //        .AddDependencyCollector();
+            //});
+
+            var exporter = new PrometheusExporter(new PrometheusExporterOptions
             {
-                builder
-                    //.SetSampler(Samplers.AlwaysSample)
-                    .UseApplicationInsights(telemetryConfiguration =>
-                    {
-                        var instrumentationKey = this.Configuration.GetValue<string>("ApplicationInsights:InstrumentationKey");
-                        telemetryConfiguration.InstrumentationKey = instrumentationKey;
-                    })
-                    .AddRequestCollector()
-                    .AddDependencyCollector();
+                Url = "http://localhost:9184/metrics/",
+
             });
+            services.AddOpenTelemetryMetrics((sp, builder) =>
+            {
+                builder.AddProcessorPipeline(b => b.SetExporter(exporter)).AddRequestCollector();
+                
+            });
+
+
+            services.AddSingleton(new PrometheusExporterMetricsHttpServer(exporter));
+            services.AddHostedService<PrometheusHostedService>();
+
         }
 
         public void Configure(IApplicationBuilder app, IWebHostEnvironment env)

@@ -22,7 +22,8 @@ namespace OpenTelemetry.Collector
 {
     public class DiagnosticSourceSubscriber : IDisposable, IObserver<DiagnosticListener>
     {
-        private readonly Func<string, ListenerHandler> handlerFactory;
+        private readonly Func<string, IListenerHandler> handlerFactory;
+        private readonly Func<string, IListenerHandler> metricsHandlerFactory;
         private readonly Func<DiagnosticListener, bool> diagnosticSourceFilter;
         private readonly Func<string, object, object, bool> isEnabledFilter;
         private long disposed;
@@ -36,12 +37,29 @@ namespace OpenTelemetry.Collector
         }
 
         public DiagnosticSourceSubscriber(
+           ListenerMetricsHandler handler,
+           Func<string, object, object, bool> isEnabledFilter) : this(_ => handler, value => handler.SourceName == value.Name, isEnabledFilter)
+        {
+        }
+
+        public DiagnosticSourceSubscriber(
             Func<string, ListenerHandler> handlerFactory,
             Func<DiagnosticListener, bool> diagnosticSourceFilter,
             Func<string, object, object, bool> isEnabledFilter)
         {
             this.listenerSubscriptions = new List<IDisposable>();
             this.handlerFactory = handlerFactory ?? throw new ArgumentNullException(nameof(handlerFactory));
+            this.diagnosticSourceFilter = diagnosticSourceFilter;
+            this.isEnabledFilter = isEnabledFilter;
+        }
+
+        public DiagnosticSourceSubscriber(
+          Func<string, ListenerMetricsHandler> metricsHandlerFactory,
+          Func<DiagnosticListener, bool> diagnosticSourceFilter,
+          Func<string, object, object, bool> isEnabledFilter)
+        {
+            this.listenerSubscriptions = new List<IDisposable>();
+            this.metricsHandlerFactory = metricsHandlerFactory ?? throw new ArgumentNullException(nameof(metricsHandlerFactory));
             this.diagnosticSourceFilter = diagnosticSourceFilter;
             this.isEnabledFilter = isEnabledFilter;
         }
@@ -59,8 +77,20 @@ namespace OpenTelemetry.Collector
             if ((Interlocked.Read(ref this.disposed) == 0) &&
                 this.diagnosticSourceFilter(value))
             {
-                var handler = this.handlerFactory(value.Name);
-                var listener = new DiagnosticSourceListener(handler);
+                DiagnosticSourceListener listener;
+
+                // TODO: Handle this better.
+                if (this.handlerFactory != null) 
+                {
+                    var handler = this.handlerFactory(value.Name);
+                    listener = new DiagnosticSourceListener(handler);
+                }
+                else
+                {
+                    var handler = this.metricsHandlerFactory(value.Name);
+                    listener = new DiagnosticSourceListener(handler);
+                }
+
                 var subscription = this.isEnabledFilter == null ?
                     value.Subscribe(listener) :
                     value.Subscribe(listener, this.isEnabledFilter);

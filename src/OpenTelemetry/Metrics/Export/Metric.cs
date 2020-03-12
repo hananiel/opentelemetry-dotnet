@@ -34,7 +34,16 @@ namespace OpenTelemetry.Metrics.Export
             this.MetricName = metricName;
             this.MetricDescription = desc;
             this.Labels = labels;
-            this.AggregationType = type;
+            this.LongValue = value;
+        }
+
+        public Metric(string metricNamespace, string metricName, string desc, IEnumerable<KeyValuePair<string, string>> labels, double value)
+        {
+            this.MetricNamespace = metricNamespace;
+            this.MetricName = metricName;
+            this.MetricDescription = desc;
+            this.Labels = labels;
+            this.DoubleValue = value;
         }
 
         public string MetricNamespace { get; private set; }
@@ -45,8 +54,8 @@ namespace OpenTelemetry.Metrics.Export
 
         public AggregationType AggregationType { get; private set; }
 
-        public IEnumerable<KeyValuePair<string, string>> Labels { get; private set; }
+        public long? LongValue { get; set; }
 
-        public MetricData<T> Data { get; internal set; }
+        public double? DoubleValue { get; set; }
     }
 }

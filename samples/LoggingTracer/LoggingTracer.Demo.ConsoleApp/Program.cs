@@ -26,7 +26,7 @@ namespace LoggingTracer.Demo.ConsoleApp
         {
             // Run the "Foo" scenario using a custom SDK implementation (Tracer, Span, ...)
             // that logs the received calls to the console.
-            await RunFooWithLogingTracer();
+           // await RunFooWithLogingTracer();
 
             // Run the "Foo" scenario using the default SDK with a custom exporter
             // that logs exported span data to the console.

@@ -1,4 +1,4 @@
-﻿// <copyright file="ListenerHandler.cs" company="OpenTelemetry Authors">
+﻿// <copyright file="ListenerMetricsHandler.cs" company="OpenTelemetry Authors">
 // Copyright 2018, OpenTelemetry Authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
@@ -14,18 +14,19 @@
 // limitations under the License.
 // </copyright>
 using System.Diagnostics;
+using OpenTelemetry.Metrics;
 using OpenTelemetry.Trace;
 
 namespace OpenTelemetry.Collector
 {
-    public abstract class ListenerHandler : IListenerHandler
+    public abstract class ListenerMetricsHandler : IListenerHandler
     {
-        protected readonly Tracer Tracer;
+        protected readonly Meter Meter;
 
-        public ListenerHandler(string sourceName, Tracer tracer)
+        public ListenerMetricsHandler(string sourceName, Meter meter)
         {
             this.SourceName = sourceName;
-            this.Tracer = tracer;
+            this.Meter = meter;
         }
 
         public string SourceName { get; }
@@ -34,18 +35,6 @@ namespace OpenTelemetry.Collector
 
         public virtual void OnStopActivity(Activity activity, object payload)
         {
-            var span = this.Tracer.CurrentSpan;
-
-            if (span == null || !span.Context.IsValid)
-            {
-                CollectorEventSource.Log.NullOrBlankSpan("ListenerHandler.OnStopActivity");
-                return;
-            }
-
-            foreach (var tag in activity.Tags)
-            {
-                span.SetAttribute(tag.Key, tag.Value);
-            }
         }
 
         public virtual void OnException(Activity activity, object payload)

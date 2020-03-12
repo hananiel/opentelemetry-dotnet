@@ -57,7 +57,7 @@ namespace LoggingTracer
         /// <inheritdoc/>
         public override TelemetrySpan StartSpan(string operationName, TelemetrySpan parent, SpanKind kind, SpanCreationOptions options)
         {
-            Logger.Log($"{this.prefix}.StartSpan({operationName}, {parent.GetType().Name}, {kind}, {options.StartTimestamp:o}, {options.LinksFactory}, {options.Links})");
+            Logger.Log($"{this.prefix}.StartSpan({operationName}, {parent?.GetType().Name}, {kind}, {options?.StartTimestamp:o}, {options?.LinksFactory}, {options?.Links})");
             return new LoggingSpan(operationName, kind);
         }
 

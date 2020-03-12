@@ -20,6 +20,8 @@ namespace Microsoft.Extensions.DependencyInjection
     using Microsoft.Extensions.DependencyInjection.Extensions;
     using Microsoft.Extensions.Hosting;
     using OpenTelemetry.Hosting.Implementation;
+    using OpenTelemetry.Metrics;
+    using OpenTelemetry.Metrics.Configuration;
     using OpenTelemetry.Trace;
     using OpenTelemetry.Trace.Configuration;
 
@@ -115,9 +117,78 @@ namespace Microsoft.Extensions.DependencyInjection
             return services;
         }
 
+        /// <summary>
+        /// Adds OpenTelemetry services to the specified <see cref="IServiceCollection" />.
+        /// </summary>
+        /// <param name="services">The <see cref="IServiceCollection" /> to add services to.</param>
+        /// <param name="configure">The <see cref="Meter"/> configuration delegate.</param>
+        /// <returns>The <see cref="IServiceCollection"/> so that additional calls can be chained.</returns>
+        public static IServiceCollection AddOpenTelemetryMetrics(this IServiceCollection services, Action<IServiceProvider, MeterBuilder> configure)
+        {
+            services.AddOpenTelemetryMetrics(s => MeterFactory.Create(builder => configure(s, builder)));
+            services.AddSingleton<MeterFactory>(s => (MeterFactory)s.GetRequiredService<MeterFactoryBase>());
+
+            return services;
+        }
+
+        /// <summary>
+        /// Add OpenTelemetry Metrics services to the specified <see cref="IServiceCollection" />.
+        /// </summary>
+        /// <param name="services">The <see cref="IServiceCollection" /> to add services to.</param>
+        /// <param name="createFactory">A delegate that provides the factory to be registered.</param>
+        /// <returns>The <see cref="IServiceCollection"/> so that additional calls can be chained.</returns>
+        public static IServiceCollection AddOpenTelemetryMetrics(this IServiceCollection services, Func<IServiceProvider, MeterFactoryBase> createFactory)
+        {
+            if (services is null)
+            {
+                throw new ArgumentNullException(nameof(services));
+            }
+
+            if (createFactory is null)
+            {
+                throw new ArgumentNullException(nameof(createFactory));
+            }
+
+            services.AddSingleton<MeterFactoryBase>(s => createFactory(s));
+
+            AddOpenTelemetryMetricsCore(services);
+
+            return services;
+        }
+
+        /// <summary>
+        /// Add Metrics.
+        /// </summary>
+        /// <param name="services">Services Provider.</param>
+        /// <param name="createFactory">A delegate that provides the factory to be registered. </param>
+        /// <returns>The <see cref="IServiceCollection"/> so that additional calls can be chained.</returns>
+        public static IServiceCollection AddOpenTelemetryMetrics(this IServiceCollection services, Func<MeterFactoryBase> createFactory)
+        {
+            if (services is null)
+            {
+                throw new ArgumentNullException(nameof(services));
+            }
+
+            if (createFactory is null)
+            {
+                throw new ArgumentNullException(nameof(createFactory));
+            }
+
+            services.AddSingleton<MeterFactoryBase>(s => createFactory());
+
+            AddOpenTelemetryMetricsCore(services);
+
+            return services;
+        }
+
         private static void AddOpenTelemetryCore(IServiceCollection services)
         {
             services.TryAddEnumerable(ServiceDescriptor.Singleton<IHostedService, TelemetryFactoryHostedService>());
+        }
+
+        private static void AddOpenTelemetryMetricsCore(IServiceCollection services)
+        {
+            services.TryAddEnumerable(ServiceDescriptor.Singleton<IHostedService, TelemetryMetricsFactoryHostedService>());
         }
     }
 }

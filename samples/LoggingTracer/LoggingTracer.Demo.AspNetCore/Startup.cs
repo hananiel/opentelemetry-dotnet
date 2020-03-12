@@ -11,21 +11,26 @@ namespace LoggingTracer.Demo.AspNetCore
     using Microsoft.Extensions.Hosting;
     using OpenTelemetry.Collector.AspNetCore;
     using OpenTelemetry.Collector.Dependencies;
+    using OpenTelemetry.Trace.Configuration;
 
     public class Startup
     {
         public void ConfigureServices(IServiceCollection services)
         {
+
             services.AddOpenTelemetry(() =>
             {
-                var tracerFactory = new LoggingTracerFactory();
-                var tracer = tracerFactory.GetTracer("ServerApp", "semver:1.0.0");
 
+                var exporter = new LoggingExporter();
+                var tracerFactory = TracerFactory.Create(builder => builder.AddProcessorPipeline(c => c.SetExporter(exporter)));
+                var tracer = tracerFactory.GetTracer("ServerApp", "semver:1.0.0");
                 var dependenciesCollector = new DependenciesCollector(new HttpClientCollectorOptions(), tracerFactory);
                 var aspNetCoreCollector = new AspNetCoreCollector(tracer);
-
                 return tracerFactory;
+
             });
+
+          
         }
 
         public void Configure(IApplicationBuilder app, IWebHostEnvironment env)

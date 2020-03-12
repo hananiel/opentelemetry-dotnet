@@ -17,6 +17,7 @@
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
+using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using OpenTelemetry.Metrics.Aggregators;
@@ -69,9 +70,32 @@ namespace OpenTelemetry.Metrics.Export
 
         public override void Process(string meterName, string metricName, LabelSet labelSet, Aggregator<double> aggregator)
         {
-            var metric = new Metric<double>(meterName, metricName, meterName + metricName, labelSet.Labels, aggregator.GetAggregationType());
-            metric.Data = aggregator.ToMetricData();
-            this.doubleMetrics.Add(metric);
+            var metric = new Metric(meterName, metricName, meterName + metricName, labelSet.Labels, sumAggregator.ValueFromLastCheckpoint());
+            this.metrics.Add(metric);
+        }
+
+        public override void ProcessMeasure(string meterName, string metricName, LabelSet labelSet, MeasureExactAggregator<long> measureAggregator)
+        {
+            var metric = new Metric(meterName, metricName, meterName + metricName, labelSet.Labels, gaugeAggregator.ValueFromLastCheckpoint().Item1);
+            this.metrics.Add(metric);
+        }
+
+        public override void ProcessMeasure(string meterName, string metricName, LabelSet labelSet, MeasureExactAggregator<double> measureAggregator)
+        {
+            var metric = new Metric(meterName, metricName, meterName + metricName, labelSet.Labels, gaugeAggregator.ValueFromLastCheckpoint().Item1);
+            this.metrics.Add(metric);
+        }
+
+        public override void ProcessObserver(string meterName, string metricName, LabelSet labelSet, LastValueAggregator<long> lastValueAggregator)
+        {
+            var metric = new Metric(meterName, metricName, meterName + metricName, labelSet.Labels, measureAggregator.ValueFromLastCheckpoint().Last()); // TODO: Not sure
+            this.metrics.Add(metric);
+        }
+
+        public override void ProcessObserver(string meterName, string metricName, LabelSet labelSet, LastValueAggregator<double> lastValueAggregator)
+        {
+            var metric = new Metric(meterName, metricName, meterName + metricName, labelSet.Labels, measureAggregator.ValueFromLastCheckpoint().Last()); // TODO: Not sure
+            this.metrics.Add(metric);
         }
 
         private async Task Worker(CancellationToken cancellationToken)
