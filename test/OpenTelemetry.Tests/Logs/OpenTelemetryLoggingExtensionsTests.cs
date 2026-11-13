@@ -1,0 +1,681 @@
+// Copyright The OpenTelemetry Authors
+// SPDX-License-Identifier: Apache-2.0
+
+using Microsoft.Extensions.Configuration;
+using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Options;
+using OpenTelemetry.Tests;
+
+namespace OpenTelemetry.Logs.Tests;
+
+#pragma warning disable CA1848 // Use the LoggerMessage delegates
+
+public sealed class OpenTelemetryLoggingExtensionsTests
+{
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void ServiceCollectionAddOpenTelemetryNoParametersTest(bool callUseExtension)
+    {
+        var optionsCallbackInvoked = false;
+
+        var serviceCollection = new ServiceCollection();
+
+        serviceCollection.AddLogging(logging =>
+        {
+            if (callUseExtension)
+            {
+                logging.UseOpenTelemetry();
+            }
+            else
+            {
+                logging.AddOpenTelemetry();
+            }
+        });
+
+        serviceCollection.Configure<OpenTelemetryLoggerOptions>(options =>
+        {
+            optionsCallbackInvoked = true;
+        });
+
+        using var serviceProvider = serviceCollection.BuildServiceProvider();
+
+        var loggerFactory = serviceProvider.GetService<ILoggerFactory>();
+
+        Assert.NotNull(loggerFactory);
+
+        Assert.True(optionsCallbackInvoked);
+    }
+
+    [Theory]
+    [InlineData(false, 1, 0)]
+    [InlineData(false, 1, 1)]
+    [InlineData(false, 5, 5)]
+    [InlineData(true, 1, 0)]
+    [InlineData(true, 1, 1)]
+    [InlineData(true, 5, 5)]
+    public void ServiceCollectionAddOpenTelemetryConfigureActionTests(
+        bool callUseExtension,
+        int numberOfBuilderRegistrations,
+        int numberOfOptionsRegistrations)
+    {
+        var configureCallbackInvocations = 0;
+        var optionsCallbackInvocations = 0;
+        OpenTelemetryLoggerOptions? optionsInstance = null;
+
+        var serviceCollection = new ServiceCollection();
+
+        serviceCollection.AddLogging(logging =>
+        {
+            for (var i = 0; i < numberOfBuilderRegistrations; i++)
+            {
+                if (callUseExtension)
+                {
+                    logging.UseOpenTelemetry(configureBuilder: null, configureOptions: ConfigureCallback);
+                }
+                else
+                {
+                    logging.AddOpenTelemetry(ConfigureCallback);
+                }
+            }
+        });
+
+        for (var i = 0; i < numberOfOptionsRegistrations; i++)
+        {
+            serviceCollection.Configure<OpenTelemetryLoggerOptions>(OptionsCallback);
+        }
+
+        using var serviceProvider = serviceCollection.BuildServiceProvider();
+
+        var loggerFactory = serviceProvider.GetService<ILoggerFactory>();
+
+        Assert.NotNull(loggerFactory);
+
+        Assert.NotNull(optionsInstance);
+
+        Assert.Equal(numberOfBuilderRegistrations, configureCallbackInvocations);
+        Assert.Equal(numberOfOptionsRegistrations, optionsCallbackInvocations);
+
+        void ConfigureCallback(OpenTelemetryLoggerOptions options)
+        {
+            if (optionsInstance == null)
+            {
+                optionsInstance = options;
+            }
+            else
+            {
+                Assert.Equal(optionsInstance, options);
+            }
+
+            configureCallbackInvocations++;
+        }
+
+        void OptionsCallback(OpenTelemetryLoggerOptions options)
+        {
+            if (optionsInstance == null)
+            {
+                optionsInstance = options;
+            }
+            else
+            {
+                Assert.Equal(optionsInstance, options);
+            }
+
+            optionsCallbackInvocations++;
+        }
+    }
+
+    [Fact]
+    public void UseOpenTelemetryDependencyInjectionTest()
+    {
+        var serviceCollection = new ServiceCollection();
+
+        serviceCollection.AddLogging(logging =>
+        {
+            logging.UseOpenTelemetry(builder =>
+            {
+                builder.ConfigureServices(services =>
+                {
+                    services.AddSingleton<TestLogProcessor>();
+                });
+
+                builder.ConfigureBuilder((sp, builder) =>
+                {
+                    builder.AddProcessor(
+                        sp.GetRequiredService<TestLogProcessor>());
+                });
+            });
+        });
+
+        using var sp = serviceCollection.BuildServiceProvider();
+
+        var loggerProvider = sp.GetRequiredService<LoggerProvider>() as LoggerProviderSdk;
+
+        Assert.NotNull(loggerProvider);
+
+        Assert.NotNull(loggerProvider.Processor);
+
+        Assert.IsType<TestLogProcessor>(loggerProvider.Processor);
+    }
+
+    [Fact]
+    public void UseOpenTelemetryOptionsOrderingTest()
+    {
+        var currentIndex = -1;
+        var beforeDelegateIndex = -1;
+        var extensionDelegateIndex = -1;
+        var afterDelegateIndex = -1;
+
+        var serviceCollection = new ServiceCollection();
+
+        var config = new ConfigurationBuilder()
+            .AddInMemoryCollection(new Dictionary<string, string?> { ["Logging:OpenTelemetry:IncludeFormattedMessage"] = "true" })
+            .Build();
+
+        serviceCollection.Configure<OpenTelemetryLoggerOptions>(o =>
+        {
+            // Verify this fires BEFORE options are bound
+            Assert.False(o.IncludeFormattedMessage);
+
+            beforeDelegateIndex = ++currentIndex;
+        });
+
+        serviceCollection.AddLogging(logging =>
+        {
+            // Note: Typically the host binds logging configuration to the
+            // "Logging" section but since we aren't using a host we do this
+            // manually.
+            logging.AddConfiguration(config.GetSection("Logging"));
+
+            logging.UseOpenTelemetry(
+                configureBuilder: null,
+                configureOptions: o =>
+                {
+                    // Verify this fires AFTER options are bound
+                    Assert.True(o.IncludeFormattedMessage);
+
+                    extensionDelegateIndex = ++currentIndex;
+                });
+        });
+
+        serviceCollection.Configure<OpenTelemetryLoggerOptions>(o => afterDelegateIndex = ++currentIndex);
+
+        using var sp = serviceCollection.BuildServiceProvider();
+
+        var loggerProvider = sp.GetRequiredService<LoggerProvider>() as LoggerProviderSdk;
+
+        Assert.NotNull(loggerProvider);
+
+        Assert.Equal(0, beforeDelegateIndex);
+        Assert.Equal(1, extensionDelegateIndex);
+        Assert.Equal(2, afterDelegateIndex);
+    }
+
+    [Fact]
+    public void UseOpenTelemetryBindsAllOptionsFromConfigurationTest()
+    {
+        var serviceCollection = new ServiceCollection();
+
+        var config = new ConfigurationBuilder()
+            .AddInMemoryCollection(new Dictionary<string, string?>
+            {
+                ["Logging:OpenTelemetry:IncludeFormattedMessage"] = "true",
+                ["Logging:OpenTelemetry:IncludeScopes"] = "true",
+                ["Logging:OpenTelemetry:ParseStateValues"] = "true",
+                ["Logging:OpenTelemetry:SchemaUrl"] = "https://example.com/schema",
+                ["Logging:OpenTelemetry:Version"] = "1.2.3",
+                ["Logging:OpenTelemetry:IncludeAttributes"] = "false",
+                ["Logging:OpenTelemetry:IncludeTraceState"] = "true",
+            })
+            .Build();
+
+        serviceCollection.AddLogging(logging =>
+        {
+            logging.AddConfiguration(config.GetSection("Logging"));
+            logging.UseOpenTelemetry();
+        });
+
+        using var sp = serviceCollection.BuildServiceProvider();
+
+        var options = sp.GetRequiredService<IOptions<OpenTelemetryLoggerOptions>>().Value;
+
+        Assert.True(options.IncludeFormattedMessage);
+        Assert.True(options.IncludeScopes);
+        Assert.True(options.ParseStateValues);
+        Assert.Equal("https://example.com/schema", options.SchemaUrl);
+        Assert.Equal("1.2.3", options.Version);
+
+        // Internal properties are not configurable from configuration and keep their defaults.
+        Assert.True(options.IncludeAttributes);
+        Assert.False(options.IncludeTraceState);
+    }
+
+    [Fact]
+    public void UseOpenTelemetryCalledTwiceRegistersOptionsBindingOnceTest()
+    {
+        var serviceCollection = new ServiceCollection();
+
+        serviceCollection.AddLogging(logging =>
+        {
+            logging.UseOpenTelemetry();
+            logging.UseOpenTelemetry();
+        });
+
+        Assert.Single(
+            serviceCollection,
+            d => d.ServiceType == typeof(IConfigureOptions<OpenTelemetryLoggerOptions>)
+                && d.ImplementationType == typeof(OpenTelemetryLoggerOptionsConfigureOptions));
+
+        Assert.Single(
+            serviceCollection,
+            d => d.ServiceType == typeof(IOptionsChangeTokenSource<OpenTelemetryLoggerOptions>));
+    }
+
+    [Fact]
+    public void UseOpenTelemetryIgnoresEmptyBooleanOptionValuesTest()
+    {
+        // Empty values are skipped by the generated binder, so the defaults are kept.
+        // The reflection-based binder used previously threw on some target frameworks.
+        var options = GetOptionsFromConfiguration(
+            new Dictionary<string, string?>
+            {
+                ["Logging:OpenTelemetry:IncludeFormattedMessage"] = string.Empty,
+                ["Logging:OpenTelemetry:IncludeScopes"] = string.Empty,
+                ["Logging:OpenTelemetry:ParseStateValues"] = string.Empty,
+            });
+
+        Assert.False(options.IncludeFormattedMessage);
+        Assert.False(options.IncludeScopes);
+        Assert.False(options.ParseStateValues);
+    }
+
+    [Theory]
+    [InlineData("notabool")]
+    [InlineData(" ")]
+    public void UseOpenTelemetryThrowsForInvalidBooleanOptionValuesTest(string value)
+    {
+        Assert.Throws<InvalidOperationException>(
+            () => GetOptionsFromConfiguration(new Dictionary<string, string?> { ["Logging:OpenTelemetry:IncludeScopes"] = value }));
+    }
+
+    [Fact]
+    public void VerifyAddProcessorOverloadWithImplementationFactory()
+    {
+        // arrange
+        var services = new ServiceCollection();
+
+        services.AddSingleton<TestLogProcessor>();
+
+        services.AddLogging(logging =>
+            logging.AddOpenTelemetry(
+                o => o.AddProcessor(sp => sp.GetRequiredService<TestLogProcessor>())));
+
+        // act
+        using var sp = services.BuildServiceProvider();
+
+        var loggerProvider = sp.GetRequiredService<LoggerProvider>() as LoggerProviderSdk;
+
+        // assert
+        Assert.NotNull(loggerProvider);
+        Assert.NotNull(loggerProvider.Processor);
+        Assert.IsType<TestLogProcessor>(loggerProvider.Processor);
+    }
+
+    [Fact]
+    public void VerifyExceptionIsThrownWhenImplementationFactoryIsNull()
+    {
+        // arrange
+        var services = new ServiceCollection();
+
+        services.AddLogging(logging =>
+            logging.AddOpenTelemetry(
+                o => o.AddProcessor(implementationFactory: null!)));
+
+        // act
+        using var sp = services.BuildServiceProvider();
+
+        // assert
+        Assert.Throws<ArgumentNullException>(() => sp.GetRequiredService<LoggerProvider>() as LoggerProviderSdk);
+    }
+
+    [Fact]
+    public void LoggerOptionsCanDependOnLoggerFilterOptions()
+    {
+        var invocations = 0;
+        var services = new ServiceCollection();
+        services.AddOptions<OpenTelemetryLoggerOptions>().Configure<IOptions<LoggerFilterOptions>>((options, filters) =>
+        {
+            invocations++;
+            Assert.NotNull(filters.Value);
+        });
+        services.AddLogging(builder => builder.AddOpenTelemetry());
+
+        using var serviceProvider = services.BuildServiceProvider();
+        Assert.NotNull(serviceProvider.GetRequiredService<ILoggerFactory>());
+        Assert.Equal(1, invocations);
+    }
+
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public void CircularReferenceTest(bool requestLoggerProviderDirectly)
+    {
+        // Note: This test exercises the deferred LoggerProvider resolution path
+        // that breaks the circular reference fixed by
+        // https://github.com/open-telemetry/opentelemetry-dotnet/pull/7308. The
+        // re-entrant resolution it guards against only throws under the stricter
+        // circular dependency detection in .NET 11's dependency injection container.
+        var services = new ServiceCollection();
+
+        services.AddLogging(logging => logging.AddOpenTelemetry());
+
+        services.ConfigureOpenTelemetryLoggerProvider(builder => builder.AddProcessor<TestLogProcessorWithILoggerFactoryDependency>());
+
+        using var sp = services.BuildServiceProvider();
+
+        if (requestLoggerProviderDirectly)
+        {
+            var provider = sp.GetRequiredService<LoggerProvider>();
+            Assert.NotNull(provider);
+        }
+        else
+        {
+            var factory = sp.GetRequiredService<ILoggerFactory>();
+            Assert.NotNull(factory);
+
+            var logger = factory.CreateLogger("MyLogger");
+            Assert.NotNull(logger);
+        }
+
+        var loggerProvider = sp.GetRequiredService<LoggerProvider>() as LoggerProviderSdk;
+
+        Assert.NotNull(loggerProvider);
+        Assert.IsType<TestLogProcessorWithILoggerFactoryDependency>(loggerProvider.Processor);
+    }
+
+    [Fact]
+    public void LazyProviderRetriesAfterFailedBuildTest()
+    {
+        var configureInvocationCount = 0;
+        TestLogProcessor? configuredProcessor = null;
+        var services = new ServiceCollection();
+
+        services.AddLogging(logging => logging.AddOpenTelemetry());
+
+        services.ConfigureOpenTelemetryLoggerProvider((sp, builder) =>
+        {
+            if (Interlocked.Increment(ref configureInvocationCount) == 1)
+            {
+                throw new InvalidOperationException("The first logger provider build is expected to fail.");
+            }
+
+            configuredProcessor = new TestLogProcessor();
+            builder.AddProcessor(configuredProcessor);
+        });
+
+        using var serviceProvider = services.BuildServiceProvider();
+        var loggerFactory = serviceProvider.GetRequiredService<ILoggerFactory>();
+
+        Assert.Throws<InvalidOperationException>(() => loggerFactory.CreateLogger("FirstLogger"));
+
+        var logger = loggerFactory.CreateLogger("SecondLogger");
+        logger.Log(
+            LogLevel.Information,
+            new EventId(1),
+            "This record should be processed.",
+            exception: null,
+            static (state, _) => state);
+
+        var processor = Assert.IsType<TestLogProcessor>(configuredProcessor);
+        Assert.Equal(2, configureInvocationCount);
+        Assert.Equal(1, processor.OnEndCount);
+    }
+
+    [Fact]
+    public void LazyProviderDoesNotRetryAfterFailedBuildMutatesBuilderStateTest()
+    {
+        var configureInvocationCount = 0;
+#pragma warning disable CA2000 // Dispose objects before losing scope
+        var processor = new TestLogProcessor();
+#pragma warning restore CA2000 // Dispose objects before losing scope
+        var services = new ServiceCollection();
+
+        services.AddLogging(logging => logging.AddOpenTelemetry());
+
+        services.ConfigureOpenTelemetryLoggerProvider((sp, builder) =>
+        {
+            configureInvocationCount++;
+            builder.AddProcessor(processor);
+            throw new InvalidOperationException("The logger provider build is expected to fail.");
+        });
+
+        using var serviceProvider = services.BuildServiceProvider();
+        var loggerFactory = serviceProvider.GetRequiredService<ILoggerFactory>();
+
+        var firstException = Assert.Throws<InvalidOperationException>(
+            () => loggerFactory.CreateLogger("FirstLogger"));
+
+        Assert.True(processor.Disposed);
+
+        var secondException = Assert.Throws<InvalidOperationException>(
+            () => loggerFactory.CreateLogger("SecondLogger"));
+
+        Assert.Same(firstException, secondException);
+        Assert.Equal(1, configureInvocationCount);
+    }
+
+    [Fact]
+    public void LazyProviderRetriesAfterReentrantFailedBuildTest()
+    {
+        var configureInvocationCount = 0;
+        TestLogProcessor? configuredProcessor = null;
+        ILogger? reentrantLogger = null;
+        var services = new ServiceCollection();
+
+        services.AddLogging(logging => logging.AddOpenTelemetry());
+
+        services.ConfigureOpenTelemetryLoggerProvider((sp, builder) =>
+        {
+            if (Interlocked.Increment(ref configureInvocationCount) == 1)
+            {
+                reentrantLogger = sp.GetRequiredService<ILoggerFactory>().CreateLogger("ReentrantLogger");
+                throw new InvalidOperationException("The first logger provider build is expected to fail.");
+            }
+
+            configuredProcessor = new TestLogProcessor();
+            builder.AddProcessor(configuredProcessor);
+        });
+
+        using var serviceProvider = services.BuildServiceProvider();
+        var loggerFactory = serviceProvider.GetRequiredService<ILoggerFactory>();
+
+        Assert.Throws<InvalidOperationException>(() => loggerFactory.CreateLogger("FirstLogger"));
+
+        var logger = Assert.IsType<ILogger>(reentrantLogger, exactMatch: false);
+        logger.Log(
+            LogLevel.Information,
+            new EventId(1),
+            "This record should be processed after the retry.",
+            exception: null,
+            static (state, _) => state);
+
+        var processor = Assert.IsType<TestLogProcessor>(configuredProcessor);
+        Assert.Equal(2, configureInvocationCount);
+        Assert.Equal(1, processor.OnEndCount);
+    }
+
+    [Theory]
+    [InlineData("")]
+    [InlineData(" ")]
+    public void LoggerWithBlankCategoryNameRetainsVersionAndSchemaUrlTest(string categoryName)
+    {
+        var logRecords = new List<LogRecord>();
+        var services = new ServiceCollection();
+
+        services.AddLogging(logging => logging.AddOpenTelemetry(options =>
+        {
+            options.Version = "1.0.0";
+            options.SchemaUrl = "https://opentelemetry.io/schemas/1.0.0";
+            options.AddInMemoryExporter(logRecords);
+        }));
+
+        using var sp = services.BuildServiceProvider();
+
+        var factory = sp.GetRequiredService<ILoggerFactory>();
+        var logger = factory.CreateLogger(categoryName);
+
+        logger.LogInformation("Test message");
+
+        var logRecord = Assert.Single(logRecords);
+
+        Assert.NotNull(logRecord.Logger);
+        Assert.Equal("1.0.0", logRecord.Logger.Version);
+        Assert.Equal("https://opentelemetry.io/schemas/1.0.0", logRecord.Logger.SchemaUrl);
+    }
+
+    [Theory]
+    [InlineData(true, false)]
+    [InlineData(false, true)]
+    [InlineData(false, false)]
+    public void OptionReloadingTest(bool useOptionsMonitor, bool useOptionsSnapshot)
+    {
+        var delegateInvocationCount = 0;
+
+        var root = new ConfigurationBuilder().Build();
+
+        var services = new ServiceCollection();
+
+        services.AddSingleton<IConfiguration>(root);
+
+        services.AddLogging(logging => logging
+            .AddConfiguration(root.GetSection("logging"))
+            .AddOpenTelemetry(options =>
+            {
+                delegateInvocationCount++;
+
+                options.AddProcessor(new TestLogProcessor());
+            }));
+
+        using var sp = services.BuildServiceProvider();
+
+        if (useOptionsMonitor)
+        {
+            var optionsMonitor = sp.GetRequiredService<IOptionsMonitor<OpenTelemetryLoggerOptions>>();
+
+            Assert.NotNull(optionsMonitor.CurrentValue);
+        }
+
+        if (useOptionsSnapshot)
+        {
+            using var scope = sp.CreateScope();
+
+            var optionsSnapshot = scope.ServiceProvider.GetRequiredService<IOptionsSnapshot<OpenTelemetryLoggerOptions>>();
+
+            Assert.NotNull(optionsSnapshot.Value);
+        }
+
+        var loggerFactory = sp.GetRequiredService<ILoggerFactory>();
+
+        Assert.Equal(1, delegateInvocationCount);
+
+        root.Reload();
+
+        Assert.Equal(1, delegateInvocationCount);
+    }
+
+    [Fact]
+    public void MixedOptionsUsageTest()
+    {
+        var root = new ConfigurationBuilder().Build();
+
+        var services = new ServiceCollection();
+
+        services.AddSingleton<IConfiguration>(root);
+
+        services.AddLogging(logging => logging
+            .AddConfiguration(root.GetSection("logging"))
+            .AddOpenTelemetry(options =>
+            {
+                options.AddProcessor(new TestLogProcessor());
+            }));
+
+        using var sp = services.BuildServiceProvider();
+
+        var loggerFactory = sp.GetRequiredService<ILoggerFactory>();
+
+        var optionsMonitor = sp.GetRequiredService<IOptionsMonitor<OpenTelemetryLoggerOptions>>().CurrentValue;
+        var options = sp.GetRequiredService<IOptions<OpenTelemetryLoggerOptions>>().Value;
+
+        Assert.True(ReferenceEquals(options, optionsMonitor));
+
+        using var scope = sp.CreateScope();
+
+        var optionsSnapshot = scope.ServiceProvider.GetRequiredService<IOptionsSnapshot<OpenTelemetryLoggerOptions>>().Value;
+        Assert.True(ReferenceEquals(options, optionsSnapshot));
+    }
+
+    private static OpenTelemetryLoggerOptions GetOptionsFromConfiguration(Dictionary<string, string?> values)
+    {
+        var config = new ConfigurationBuilder()
+            .AddInMemoryCollection(values)
+            .Build();
+
+        var serviceCollection = new ServiceCollection();
+
+        serviceCollection.AddLogging(logging =>
+        {
+            logging.AddConfiguration(config.GetSection("Logging"));
+            logging.UseOpenTelemetry();
+        });
+
+        using var sp = serviceCollection.BuildServiceProvider();
+
+        return sp.GetRequiredService<IOptions<OpenTelemetryLoggerOptions>>().Value;
+    }
+
+    private sealed class TestLogProcessor : BaseProcessor<LogRecord>
+    {
+        public bool Disposed;
+
+        public int OnEndCount;
+
+        public override void OnEnd(LogRecord data)
+        {
+            this.OnEndCount++;
+
+            base.OnEnd(data);
+        }
+
+        protected override void Dispose(bool disposing)
+        {
+            this.Disposed = true;
+
+            base.Dispose(disposing);
+        }
+    }
+
+#pragma warning disable CA1812 // Avoid uninstantiated internal classes
+    private sealed class TestLogProcessorWithILoggerFactoryDependency : BaseProcessor<LogRecord>
+#pragma warning restore CA1812 // Avoid uninstantiated internal classes
+    {
+        private readonly ILogger logger;
+
+        public TestLogProcessorWithILoggerFactoryDependency(ILoggerFactory loggerFactory)
+        {
+            // Note: It is NOT recommended to log from inside a processor. This
+            // test is meant to mirror someone injecting IHttpClientFactory
+            // (which itself uses ILoggerFactory) as part of an exporter. That
+            // is a more realistic scenario but needs a dependency to do that so
+            // here we approximate the graph.
+            this.logger = loggerFactory.CreateLogger("MyLogger");
+        }
+
+        protected override void Dispose(bool disposing)
+        {
+            this.logger.DisposedCalled();
+
+            base.Dispose(disposing);
+        }
+    }
+}

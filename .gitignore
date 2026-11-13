@@ -21,6 +21,7 @@
 x64/
 x86/
 bld/
+[Aa]rtifacts/
 [Bb]in/
 [Oo]bj/
 [Ll]og/
@@ -51,6 +52,7 @@ TestResult.xml
 dlldata.c
 
 # Benchmark Results
+.bdn/
 BenchmarkDotNet.Artifacts/
 
 # .NET Core
@@ -140,6 +142,10 @@ _TeamCity*
 # Visual Studio code coverage results
 *.coverage
 *.coveragexml
+
+# Visual Studio live unit testing config
+*.lutconfig
+*.lutignore
 
 # NCrunch
 _NCrunch_*
@@ -341,3 +347,19 @@ ASALocalRun/
 /.sonarqube
 
 /src/LastMajorVersionBinaries
+
+# Coyote Rewrite Files
+rewrite.coyote.json
+
+# Test results
+TestResults/
+
+# Pester coverage results
+build/scripts/tests/coverage.xml
+build/scripts/tests/testResults.xml
+
+# Verify snapshots
+*.received.*
+
+# Nightly builds of .NET
+.dotnet/

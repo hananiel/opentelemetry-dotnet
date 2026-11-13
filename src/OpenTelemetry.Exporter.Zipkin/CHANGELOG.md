@@ -1,6 +1,443 @@
 # Changelog
 
+This file contains individual changes for the OpenTelemetry.Exporter.Zipkin
+package. For highlights and announcements covering all components see: [Release
+Notes](../../RELEASENOTES.md).
+
 ## Unreleased
+
+## 1.21.0
+
+Released 2026-Nov-11
+
+## 1.21.0-rc.2
+
+Released 2026-Nov-09
+
+* Fixed exporter option initialization failing when environment variable access
+  is denied.
+  ([#8070](https://github.com/open-telemetry/opentelemetry-dotnet/pull/8070))
+
+* An `OutOfMemoryException` thrown while converting an attribute value to a
+  string is no longer swallowed and the attribute dropped; it now propagates.
+  ([#7929](https://github.com/open-telemetry/opentelemetry-dotnet/pull/7929))
+
+## 1.21.0-rc.1
+
+Released 2026-Oct-28
+
+* Fixed array-valued tags containing `NaN` or infinite floating-point values
+  being exported as `TRUNCATED`; such values are now written as JSON strings
+  (e.g. `["NaN"]`). Arrays and maps nested inside array-valued tags are now
+  written as nested JSON (with `byte[]` values Base64-encoded) instead of as
+  their .NET type name (e.g. `System.Int32[]`).
+  ([#7694](https://github.com/open-telemetry/opentelemetry-dotnet/pull/7694))
+
+* Fixed arrays of string-valued key/value pairs being
+  serialized as JSON arrays of strings instead of JSON objects.
+  ([#7694](https://github.com/open-telemetry/opentelemetry-dotnet/pull/7694))
+
+## 1.20.1
+
+Released 2026-Oct-20
+
+## 1.20.1-rc.1
+
+Released 2026-Oct-20
+
+* The value of `OTEL_EXPORTER_ZIPKIN_ENDPOINT` is no longer written to the
+  exporter's diagnostic log when it is not a valid URI.
+  ([#7971](https://github.com/open-telemetry/opentelemetry-dotnet/pull/7971))
+
+* **Breaking Change** Dropped support for `net8.0` and `net9.0`.
+  ([#6899](https://github.com/open-telemetry/opentelemetry-dotnet/pull/6899))
+
+* Add support for .NET 11.0.
+  ([#6899](https://github.com/open-telemetry/opentelemetry-dotnet/pull/6899))
+
+## 1.20.0
+
+Released 2026-Oct-15
+
+## 1.20.0-rc.1
+
+Released 2026-Oct-15
+
+## 1.19.1
+
+Released 2026-Sep-21
+
+## 1.19.1-rc.1
+
+Released 2026-Sep-21
+
+## 1.19.0
+
+Released 2026-Sep-18
+
+## 1.19.0-rc.1
+
+Released 2026-Sep-18
+
+* Key/value list attribute values are now written as a JSON object embedded
+  in a string, mirroring the existing array handling, instead of their
+  `ToString()` representation. This also covers additional dictionary shapes
+  (`IEnumerable<KeyValuePair<string, string?>>` and `IDictionary`).
+  ([#7679](https://github.com/open-telemetry/opentelemetry-dotnet/pull/7679))
+
+## 1.18.0
+
+Released 2026-Aug-21
+
+## 1.18.0-rc.1
+
+Released 2026-Aug-21
+
+* Fixed the exporter to read responses with
+  `HttpCompletionOption.ResponseHeadersRead` for the .NET Framework and
+  .NET Standard targets, matching the behavior on .NET to avoid buffering
+  the response body in memory when it is not actually used.
+  ([#7582](https://github.com/open-telemetry/opentelemetry-dotnet/pull/7582))
+
+* Added support for serializing attribute values that are key/value lists
+  (`IEnumerable<KeyValuePair<string, object?>>`).
+  ([#7015](https://github.com/open-telemetry/opentelemetry-dotnet/pull/7015))
+
+## 1.17.0
+
+Released 2026-Jul-16
+
+## 1.17.0-rc.1
+
+Released 2026-Jul-16
+
+* The library is now marked as trim and AOT compatible.
+  ([#7441](https://github.com/open-telemetry/opentelemetry-dotnet/pull/7441))
+
+* Dropped the vendored `EnvironmentVariablesConfigurationProvider` copy; the
+  provider is now sourced transitively from the
+  `Microsoft.Extensions.Configuration.EnvironmentVariables` package referenced
+  by `OpenTelemetry`. No public API or behavioural change.
+  ([#7146](https://github.com/open-telemetry/opentelemetry-dotnet/pull/7146))
+
+## 1.16.0
+
+Released 2026-Jun-10
+
+## 1.16.0-rc.1
+
+Released 2026-Jun-10
+
+## 1.15.3
+
+Released 2026-Apr-21
+
+* Harden memory usage for endpoint caching and array tag serialization to resolve
+  [GHSA-88hf-wf7h-7w4m](https://github.com/advisories/GHSA-88hf-wf7h-7w4m).
+  ([#7081](https://github.com/open-telemetry/opentelemetry-dotnet/pull/7081))
+
+## 1.15.2
+
+Released 2026-Apr-08
+
+## 1.15.1
+
+Released 2026-Mar-27
+
+## 1.15.0
+
+Released 2026-Jan-21
+
+* This package is deprecated and it will stop receiving any updates in
+  December 2026. Zipkin already supports OTLP ingestion. Change your exporter
+  to `OpenTelemetry.Exporter.OpenTelemetryProtocol` as stated in the
+  [Deprecating Zipkin Exporter blog post](https://opentelemetry.io/blog/2025/deprecating-zipkin-exporters/).
+  ([#6750](https://github.com/open-telemetry/opentelemetry-dotnet/pull/6750))
+
+## 1.14.0
+
+Released 2025-Nov-12
+
+* **Breaking Change** NuGet packages now use the Sigstore bundle format
+  (`.sigstore.json`) for digital signatures instead of separate signature
+  (`.sig`) and certificate (`.pem`) files. This requires cosign 3.0 or later
+  for verification. See the [Digital signing
+  section](../../README.md#digital-signing) for updated verification instructions.
+  ([#6623](https://github.com/open-telemetry/opentelemetry-dotnet/pull/6623))
+
+## 1.14.0-rc.1
+
+Released 2025-Oct-21
+
+* **Breaking Change** When targeting `net8.0`, the package now depends on version
+  `8.0.0` of the `Microsoft.Extensions.DependencyInjection.Abstractions`,
+  `Microsoft.Extensions.Diagnostics.Abstractions` and
+  `Microsoft.Extensions.Logging.Configuration` NuGet packages.
+  ([#6327](https://github.com/open-telemetry/opentelemetry-dotnet/pull/6327))
+
+* Add support for .NET 10.0.
+  ([#6307](https://github.com/open-telemetry/opentelemetry-dotnet/pull/6307))
+
+## 1.13.1
+
+Released 2025-Oct-09
+
+## 1.13.0
+
+Released 2025-Oct-01
+
+* Removed the peer service resolver, which was based on earlier experimental
+  semantic conventions that are not part of the stable specification. This
+  change ensures that the exporter no longer modifies or assumes the value of
+  peer service attributes.
+  ([#6191](https://github.com/open-telemetry/opentelemetry-dotnet/pull/6191))
+
+* Extended remote endpoint calculation to align with the [opentelemetry-specification](https://github.com/open-telemetry/opentelemetry-specification/blob/v1.40.0/specification/trace/sdk_exporters/zipkin.md#otlp---zipkin).
+  ([#6191](https://github.com/open-telemetry/opentelemetry-dotnet/pull/6191))
+
+## 1.12.0
+
+Released 2025-Apr-29
+
+## 1.11.2
+
+Released 2025-Mar-04
+
+## 1.11.1
+
+Released 2025-Jan-22
+
+## 1.11.0
+
+Released 2025-Jan-15
+
+## 1.11.0-rc.1
+
+Released 2024-Dec-11
+
+## 1.10.0
+
+Released 2024-Nov-12
+
+## 1.10.0-rc.1
+
+Released 2024-Nov-01
+
+* Added direct reference to `System.Text.Json` for the `net8.0` target with
+  minimum version of `8.0.5` in response to
+  [CVE-2024-30105](https://github.com/advisories/GHSA-hh2w-p6rv-4g7w) &
+  [CVE-2024-43485](https://msrc.microsoft.com/update-guide/vulnerability/CVE-2024-43485).
+  ([#5874](https://github.com/open-telemetry/opentelemetry-dotnet/pull/5874),
+  [#5891](https://github.com/open-telemetry/opentelemetry-dotnet/pull/5891))
+
+## 1.10.0-beta.1
+
+Released 2024-Sep-30
+
+* **Breaking change**: Non-primitive tag values converted using
+  `Convert.ToString` will now format using `CultureInfo.InvariantCulture`.
+  ([#5700](https://github.com/open-telemetry/opentelemetry-dotnet/pull/5700))
+
+* Fixed `PlatformNotSupportedException`s being thrown during export when running
+  on mobile platforms which caused telemetry to be dropped silently.
+ ([#5821](https://github.com/open-telemetry/opentelemetry-dotnet-contrib/pull/5821))
+
+## 1.9.0
+
+Released 2024-Jun-14
+
+## 1.9.0-rc.1
+
+Released 2024-Jun-07
+
+## 1.9.0-alpha.1
+
+Released 2024-May-20
+
+## 1.8.1
+
+Released 2024-Apr-17
+
+## 1.8.0
+
+Released 2024-Apr-02
+
+## 1.8.0-rc.1
+
+Released 2024-Mar-27
+
+* Zipkin tags used for Instrumentation Library changed from `otel.library.name`
+  and `otel.library.version` to `otel.scope.name` and `otel.scope.version`
+  respectively.
+  Old versions of attributes are deprecated, but still exported
+  for [backward compatibility](https://github.com/open-telemetry/opentelemetry-specification/blob/v1.31.0/specification/common/mapping-to-non-otlp.md#instrumentationscope).
+  ([#5473](https://github.com/open-telemetry/opentelemetry-dotnet/pull/5473))
+
+## 1.8.0-beta.1
+
+Released 2024-Mar-14
+
+## 1.7.0
+
+Released 2023-Dec-08
+
+## 1.7.0-rc.1
+
+Released 2023-Nov-29
+
+## 1.7.0-alpha.1
+
+Released 2023-Oct-16
+
+## 1.6.0
+
+Released 2023-Sep-05
+
+## 1.6.0-rc.1
+
+Released 2023-Aug-21
+
+## 1.6.0-alpha.1
+
+Released 2023-Jul-12
+
+## 1.5.1
+
+Released 2023-Jun-26
+
+## 1.5.0
+
+Released 2023-Jun-05
+
+## 1.5.0-rc.1
+
+Released 2023-May-25
+
+* Added direct reference to `System.Text.Encodings.Web` with minimum version of
+`4.7.2` in response to [CVE-2021-26701](https://github.com/dotnet/runtime/issues/49377).
+
+## 1.5.0-alpha.2
+
+Released 2023-Mar-31
+
+## 1.5.0-alpha.1
+
+Released 2023-Mar-07
+
+## 1.4.0
+
+Released 2023-Feb-24
+
+* Updated OTel SDK dependency to 1.4.0
+
+## 1.4.0-rc.4
+
+Released 2023-Feb-10
+
+## 1.4.0-rc.3
+
+Released 2023-Feb-01
+
+* Changed EnvironmentVariable parsing to not throw a `FormatException` and
+  instead log a warning.
+  ([#4095](https://github.com/open-telemetry/opentelemetry-dotnet/pull/4095))
+
+## 1.4.0-rc.2
+
+Released 2023-Jan-09
+
+## 1.4.0-rc.1
+
+Released 2022-Dec-12
+
+## 1.4.0-beta.3
+
+Released 2022-Nov-07
+
+* Bumped the minimum required version of `System.Text.Json` to 4.7.2 in response
+to [CVE-2021-26701](https://github.com/dotnet/runtime/issues/49377).
+([#3789](https://github.com/open-telemetry/opentelemetry-dotnet/pull/3789))
+
+## 1.4.0-beta.2
+
+Released 2022-Oct-17
+
+* Added support for loading environment variables from `IConfiguration` when
+  using the `AddZipkinExporter` extension
+  ([#3759](https://github.com/open-telemetry/opentelemetry-dotnet/pull/3759))
+
+## 1.4.0-beta.1
+
+Released 2022-Sep-29
+
+* Added overloads which accept a name to the `TracerProviderBuilder`
+  `AddZipkinExporter` extension to allow for more fine-grained options
+  management
+  ([#3655](https://github.com/open-telemetry/opentelemetry-dotnet/pull/3655))
+
+## 1.4.0-alpha.2
+
+Released 2022-Aug-18
+
+## 1.4.0-alpha.1
+
+Released 2022-Aug-02
+
+## 1.3.0
+
+Released 2022-Jun-03
+
+## 1.3.0-rc.2
+
+Released 2022-June-1
+
+* Improve the conversion and formatting of attribute values.
+  The list of data types that must be supported per the
+  [OpenTelemetry specification](https://github.com/open-telemetry/opentelemetry-specification/tree/main/specification/common#attribute)
+  is more narrow than what the .NET OpenTelemetry SDK supports. Numeric
+  [built-in value types](https://docs.microsoft.com/dotnet/csharp/language-reference/builtin-types/built-in-types)
+  are supported by converting to a `long` or `double` as appropriate except for
+  numeric types that could cause overflow (`ulong`) or rounding (`decimal`)
+  which are converted to strings. Non-numeric built-in types - `string`,
+  `char`, `bool` are supported. All other types are converted to a `string`.
+  Array values are also supported.
+  ([#3281](https://github.com/open-telemetry/opentelemetry-dotnet/pull/3281))
+* Fix conversion of array-valued resource attributes. They were previously
+  converted to a string like "System.String[]".
+  ([#3281](https://github.com/open-telemetry/opentelemetry-dotnet/pull/3281))
+* Fix exporting of array-valued attributes on an `Activity`. Previously, each
+  item in the array would result in a new tag on an exported `Activity`. Now,
+  array-valued attributes are serialized to a JSON-array representation.
+  ([#3281](https://github.com/open-telemetry/opentelemetry-dotnet/pull/3281))
+
+## 1.3.0-beta.2
+
+Released 2022-May-16
+
+* Removes net5.0 target and replaced with net6.0
+  as .NET 5.0 is going out of support.
+  The package keeps netstandard2.0 target, so it
+  can still be used with .NET5.0 apps.
+  ([#3147](https://github.com/open-telemetry/opentelemetry-dotnet/issues/3147))
+
+## 1.3.0-beta.1
+
+Released 2022-Apr-15
+
+* Removes .NET Framework 4.6.1. The minimum .NET Framework
+  version supported is .NET 4.6.2. ([#3190](https://github.com/open-telemetry/opentelemetry-dotnet/issues/3190))
+
+## 1.2.0
+
+Released 2022-Apr-15
+
+## 1.2.0-rc5
+
+Released 2022-Apr-12
+
+## 1.2.0-rc4
+
+Released 2022-Mar-30
 
 * Added support for Activity Status and StatusDescription which were
   added to Activity from `System.Diagnostics.DiagnosticSource` version 6.0.
@@ -57,7 +494,7 @@ Released 2021-Sep-13
   `BatchExportActivityProcessorOptions` which supports field value overriding
   using `OTEL_BSP_SCHEDULE_DELAY`, `OTEL_BSP_EXPORT_TIMEOUT`,
   `OTEL_BSP_MAX_QUEUE_SIZE`, `OTEL_BSP_MAX_EXPORT_BATCH_SIZE`
-  envionmental variables as defined in the
+  environmental variables as defined in the
   [specification](https://github.com/open-telemetry/opentelemetry-specification/blob/v1.5.0/specification/sdk-environment-variables.md#batch-span-processor).
   ([#2219](https://github.com/open-telemetry/opentelemetry-dotnet/pull/2219))
 
@@ -136,12 +573,12 @@ Released 2021-Jan-29
 * Zipkin will now set the `error` tag to the `Status.Description` value or an
   empty string when `Status.StatusCode` (`otel.status_code` tag) is set to
   `ERROR`.
-  ([#1579](https://github.com/open-telemetry/opentelemetry-dotnet/pull/1579),
-  [#1620](https://github.com/open-telemetry/opentelemetry-dotnet/pull/1620), &
+  ([#1579](https://github.com/open-telemetry/opentelemetry-dotnet/pull/1579)
+  [#1620](https://github.com/open-telemetry/opentelemetry-dotnet/pull/1620)
   [#1655](https://github.com/open-telemetry/opentelemetry-dotnet/pull/1655))
 
 * Zipkin will no longer send the `otel.status_code` tag if the value is `UNSET`.
-  ([#1609](https://github.com/open-telemetry/opentelemetry-dotnet/pull/1609) &
+  ([#1609](https://github.com/open-telemetry/opentelemetry-dotnet/pull/1609)
   [#1620](https://github.com/open-telemetry/opentelemetry-dotnet/pull/1620))
 
 * Zipkin bool tag values will now be sent as `true`/`false` instead of
@@ -193,13 +630,13 @@ Released 2020-Sep-15
 
 Released 2020-08-28
 
-* Renamed extension method from `UseZipkinExporter` to `AddZipkinExporter`
+* Renamed extension method from `UseZipkinExporter` to `AddZipkinExporter`.
   ([#1066](https://github.com/open-telemetry/opentelemetry-dotnet/pull/1066))
-* Changed `ZipkinExporter` to use `BatchExportActivityProcessor` by default
+* Changed `ZipkinExporter` to use `BatchExportActivityProcessor` by default.
   ([#1103](https://github.com/open-telemetry/opentelemetry-dotnet/pull/1103))
 * Fixed issue when span has both the `net.peer.name` and `net.peer.port`
-  attributes but did not include `net.peer.port` in the service address field
-  ([#1168](https://github.com/open-telemetry/opentelemetry-dotnet/pull/1168)).
+  attributes but did not include `net.peer.port` in the service address field.
+  ([#1168](https://github.com/open-telemetry/opentelemetry-dotnet/pull/1168))
 
 ## 0.4.0-beta.2
 

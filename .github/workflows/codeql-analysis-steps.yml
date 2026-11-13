@@ -1,0 +1,65 @@
+name: codeql-analysis-steps
+
+on:
+  workflow_call:
+    inputs:
+      trigger:
+        required: true
+        type: string
+
+permissions: {}
+
+jobs:
+  analyze:
+    name: 'Analyze ${{ matrix.language }}'
+    permissions:
+      actions: read # Scan GitHub Actions workflows
+      contents: read # Checkout the repository
+      security-events: write # Store results in the Security tab
+    runs-on: ubuntu-26.04
+
+    strategy:
+      fail-fast: ${{ inputs.trigger == 'merge_group' }}
+      matrix:
+        language: ['actions', 'csharp']
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          filter: 'tree:0'
+          persist-credentials: false
+          show-progress: false
+
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@33d7b85da1a04171e211befe2c739303b9a4c066 # v4.39.3
+        with:
+          build-mode: none
+          dependency-caching: true
+          languages: ${{ matrix.language }}
+          queries: security-extended
+
+      - name: Perform CodeQL Analysis
+        uses: github/codeql-action/analyze@33d7b85da1a04171e211befe2c739303b9a4c066 # v4.39.3
+        with:
+          category: '/language:${{ matrix.language }}'
+
+  results:
+    name: results
+    if: ${{ !cancelled() }}
+    needs: [ analyze ]
+    runs-on: ubuntu-26.04
+
+    steps:
+      - name: Report status
+        shell: bash
+        env:
+          SCAN_SUCCESS: ${{ !contains(needs.*.result, 'failure') && !contains(needs.*.result, 'cancelled') }}
+        run: |
+          if [ "${SCAN_SUCCESS}" == "true" ]
+          then
+            echo 'CodeQL analysis successful'
+          else
+            echo 'CodeQL analysis failed'
+            exit 1
+          fi

@@ -1,0 +1,89 @@
+// Copyright The OpenTelemetry Authors
+// SPDX-License-Identifier: Apache-2.0
+
+using OpenTelemetry.Configuration.Declarative;
+using OpenTelemetry.Internal;
+
+namespace Microsoft.Extensions.Configuration;
+
+/// <summary>
+/// Extension methods for adding the OpenTelemetry declarative configuration source to
+/// an <see cref="IConfigurationBuilder"/>.
+/// </summary>
+internal static class DeclarativeConfigurationBuilderExtensions
+{
+    /// <summary>
+    /// Adds the declarative YAML source using the specified file path.
+    /// </summary>
+    /// <remarks>
+    /// No-op when a declarative configuration file is already registered. The first file wins.
+    /// </remarks>
+    /// <param name="builder">The <see cref="IConfigurationBuilder"/> to add to.</param>
+    /// <param name="filePath">Path to the YAML file.</param>
+    /// <returns>The original <see cref="IConfigurationBuilder"/> for chaining.</returns>
+    /// <exception cref="ArgumentNullException"><paramref name="builder"/> is null.</exception>
+    /// <exception cref="ArgumentException"><paramref name="filePath"/> is null, empty, or whitespace.</exception>
+    internal static IConfigurationBuilder AddOpenTelemetryDeclarativeConfiguration(
+        this IConfigurationBuilder builder,
+        string filePath)
+    {
+        Guard.ThrowIfNull(builder);
+        Guard.ThrowIfNullOrWhitespace(filePath);
+        return builder.AddOpenTelemetryDeclarativeConfiguration(new FilePath(filePath));
+    }
+
+    // Internal overload so the path is never round-tripped through a string and re-resolved
+    // by Path.GetFullPath. The FilePath struct stores the absolute path at construction time,
+    // so callers that already hold a FilePath (e.g. declarative registration) can pass it directly.
+    internal static IConfigurationBuilder AddOpenTelemetryDeclarativeConfiguration(
+        this IConfigurationBuilder builder,
+        FilePath path) =>
+        builder.AddOpenTelemetryDeclarativeConfiguration(new DeclarativeConfigurationDocumentAccessor(path));
+
+    // Overload accepting an already-created accessor, so UseDeclarativeConfiguration can register
+    // the same accessor instance in both DI and the configuration source.
+    internal static IConfigurationBuilder AddOpenTelemetryDeclarativeConfiguration(
+        this IConfigurationBuilder builder,
+        DeclarativeConfigurationDocumentAccessor accessor,
+        bool removeSourceOnFailure = false)
+    {
+        Guard.ThrowIfNull(builder);
+
+        var existingSource = builder.Sources
+            .OfType<DeclarativeConfigurationSource>()
+            .FirstOrDefault();
+
+        if (existingSource != null)
+        {
+            if (existingSource.FilePath == accessor.FilePath)
+            {
+                OpenTelemetryDeclarativeConfigurationEventSource.Log.SourceAlreadyRegisteredInBuilder(
+                    accessor.FilePath.DisplayPath);
+            }
+            else
+            {
+                OpenTelemetryDeclarativeConfigurationEventSource.Log.DifferentSourceAlreadyRegistered(
+                    existingSource.FilePath.DisplayPath,
+                    accessor.FilePath.DisplayPath);
+            }
+
+            return builder;
+        }
+
+        var source = new DeclarativeConfigurationSource(accessor);
+        try
+        {
+            builder.Sources.Add(source);
+        }
+        catch when (removeSourceOnFailure)
+        {
+            // The DI registration is transactional. ConfigurationManager may retain a source after its
+            // eager load fails, which would prevent a later valid first-source-wins registration.
+            builder.Sources.Remove(source);
+            throw;
+        }
+
+        OpenTelemetryDeclarativeConfigurationEventSource.Log.SourceRegistered(accessor.FilePath.DisplayPath);
+        return builder;
+    }
+}

@@ -1,64 +1,84 @@
-// <copyright file="WeatherForecastController.cs" company="OpenTelemetry Authors">
 // Copyright The OpenTelemetry Authors
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//     http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
-// </copyright>
+// SPDX-License-Identifier: Apache-2.0
+
+using System.Diagnostics;
+using System.Diagnostics.Metrics;
+using System.Security.Cryptography;
+using Microsoft.AspNetCore.Mvc;
 
 namespace Examples.AspNetCore.Controllers;
 
-using Microsoft.AspNetCore.Mvc;
-
 [ApiController]
 [Route("[controller]")]
-public class WeatherForecastController : ControllerBase
+public partial class WeatherForecastController : ControllerBase
 {
-    private static readonly string[] Summaries = new[]
-    {
-            "Freezing", "Bracing", "Chilly", "Cool", "Mild", "Warm", "Balmy", "Hot", "Sweltering", "Scorching",
-    };
+    private static readonly Uri RequestUri = new("http://google.com");
 
-    private static readonly HttpClient HttpClient = new HttpClient();
+    private static readonly string[] Summaries =
+    [
+        "Freezing", "Bracing", "Chilly", "Cool", "Mild", "Warm", "Balmy", "Hot", "Sweltering", "Scorching",
+    ];
 
+    private readonly HttpClient httpClient;
     private readonly ILogger<WeatherForecastController> logger;
+    private readonly ActivitySource activitySource;
+    private readonly Counter<long> freezingDaysCounter;
 
-    public WeatherForecastController(ILogger<WeatherForecastController> logger)
+    public WeatherForecastController(
+        HttpClient httpClient,
+        InstrumentationSource instrumentationSource,
+        ILogger<WeatherForecastController> logger)
     {
-        this.logger = logger ?? throw new ArgumentNullException(nameof(logger));
+        ArgumentNullException.ThrowIfNull(httpClient);
+        ArgumentNullException.ThrowIfNull(instrumentationSource);
+        ArgumentNullException.ThrowIfNull(logger);
+
+        this.httpClient = httpClient;
+        this.logger = logger;
+        this.activitySource = instrumentationSource.ActivitySource;
+        this.freezingDaysCounter = instrumentationSource.FreezingDaysCounter;
     }
 
     [HttpGet]
-    public IEnumerable<WeatherForecast> Get()
+    public async Task<IEnumerable<WeatherForecast>> Get()
     {
-        using var scope = this.logger.BeginScope("{Id}", Guid.NewGuid().ToString("N"));
-
-        // Making an http call here to serve as an example of
+        // Making an HTTP call here to serve as an example of
         // how dependency calls will be captured and treated
         // automatically as child of incoming request.
-        var res = HttpClient.GetStringAsync("http://google.com").Result;
-        var rng = new Random();
+        _ = await this.httpClient.GetStringAsync(RequestUri);
+
+        // Optional: Manually create an activity. This will become a child of
+        // the activity created from the instrumentation library for AspNetCore.
+        // Manually created activities are useful when there is a desire to track
+        // a specific subset of the request. In this example one could imagine
+        // that calculating the forecast is an expensive operation and therefore
+        // something to be distinguished from the overall request.
+        // Note: Tags can be added to the current activity without the need for
+        // a manual activity using Activity.Current?.SetTag()
+        using var activity = this.activitySource.StartActivity("calculate forecast");
+
         var forecast = Enumerable.Range(1, 5).Select(index => new WeatherForecast
         {
             Date = DateTime.Now.AddDays(index),
-            TemperatureC = rng.Next(-20, 55),
-            Summary = Summaries[rng.Next(Summaries.Length)],
+            TemperatureC = RandomNumberGenerator.GetInt32(-20, 55),
+            Summary = Summaries[RandomNumberGenerator.GetInt32(Summaries.Length)],
         })
         .ToArray();
 
-        this.logger.LogInformation(
-            "WeatherForecasts generated {count}: {forecasts}",
-            forecast.Length,
-            forecast);
+        // Optional: Count the freezing days
+        this.freezingDaysCounter.Add(forecast.Count(f => f.TemperatureC < 0));
+
+        Logger.WeatherForecastGenerated(this.logger, forecast.Length, forecast);
 
         return forecast;
+    }
+
+    private static partial class Logger
+    {
+        [LoggerMessage(
+            EventId = 1,
+            Level = LogLevel.Information,
+            Message = "WeatherForecasts generated {Count}: {Forecasts}")]
+        public static partial void WeatherForecastGenerated(ILogger logger, int count, WeatherForecast[] forecasts);
     }
 }

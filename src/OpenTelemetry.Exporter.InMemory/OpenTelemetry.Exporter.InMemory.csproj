@@ -1,15 +1,15 @@
-<Project Sdk="Microsoft.NET.Sdk">
+﻿<Project Sdk="Microsoft.NET.Sdk">
 
   <PropertyGroup>
-    <!-- OmniSharp/VS Code requires TargetFrameworks to be in descending order for IntelliSense and analysis. -->
-    <TargetFrameworks>netstandard2.0;net461</TargetFrameworks>
+    <TargetFrameworks>$(TargetFrameworksForLibraries)</TargetFrameworks>
     <Description>In-memory exporter for OpenTelemetry .NET</Description>
     <PackageTags>$(PackageTags)</PackageTags>
     <MinVerTagPrefix>core-</MinVerTagPrefix>
+    <SupportsBrowserAndMobilePlatforms>true</SupportsBrowserAndMobilePlatforms>
   </PropertyGroup>
 
   <PropertyGroup>
-    <NoWarn>$(NoWarn),1591</NoWarn>
+    <NoWarn>$(NoWarn),CS1591</NoWarn>
   </PropertyGroup>
 
   <ItemGroup>
@@ -17,9 +17,11 @@
   </ItemGroup>
 
   <ItemGroup>
-    <Compile Include="$(RepoRoot)\src\OpenTelemetry\Internal\PeriodicExportingMetricReaderHelper.cs" Link="Includes\PeriodicExportingMetricReaderHelper.cs" />
-    <Compile Include="$(RepoRoot)\src\OpenTelemetry\Internal\ServiceProviderExtensions.cs" Link="Includes\ServiceProviderExtensions.cs" />
-    <Compile Include="$(RepoRoot)\src\OpenTelemetry.Api\Internal\Guard.cs" Link="Includes\Guard.cs" />
+    <Compile Include="$(RepoRoot)\src\Shared\PeriodicExportingMetricReaderHelper.cs" Link="Includes\PeriodicExportingMetricReaderHelper.cs" />
+  </ItemGroup>
+
+  <ItemGroup Condition="'$(ExposeExperimentalFeatures)' != 'true'">
+    <InternalsVisibleTo Include="OpenTelemetry.Exporter.OpenTelemetryProtocol.Tests" PublicKey="$(StrongNamePublicKey)" />
   </ItemGroup>
 
 </Project>

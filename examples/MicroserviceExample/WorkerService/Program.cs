@@ -1,52 +1,26 @@
-// <copyright file="Program.cs" company="OpenTelemetry Authors">
 // Copyright The OpenTelemetry Authors
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//     http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
-// </copyright>
+// SPDX-License-Identifier: Apache-2.0
 
-using System;
-using Microsoft.Extensions.DependencyInjection;
-using Microsoft.Extensions.Hosting;
+using OpenTelemetry.Exporter;
 using OpenTelemetry.Trace;
 using Utils.Messaging;
+using WorkerService;
 
-namespace WorkerService
-{
-    public class Program
-    {
-        public static void Main(string[] args)
+var builder = Host.CreateApplicationBuilder(args);
+
+builder.Services.AddHostedService<Worker>();
+builder.Services.AddSingleton<MessageReceiver>();
+
+builder.Services.AddOpenTelemetry()
+    .WithTracing(b => b
+        .AddSource(nameof(MessageReceiver))
+        .AddOtlpExporter(o =>
         {
-            CreateHostBuilder(args).Build().Run();
-        }
+            var otelCollectorHostName = Environment.GetEnvironmentVariable("OTEL_COLLECTOR_HOSTNAME") ?? "localhost";
+            o.Endpoint = new Uri($"http://{otelCollectorHostName}:4318/v1/traces");
+            o.Protocol = OtlpExportProtocol.HttpProtobuf;
+        }));
 
-        public static IHostBuilder CreateHostBuilder(string[] args) =>
-            Host.CreateDefaultBuilder(args)
-                .ConfigureServices((hostContext, services) =>
-                {
-                    services.AddHostedService<Worker>();
+var app = builder.Build();
 
-                    services.AddSingleton<MessageReceiver>();
-
-                    services.AddOpenTelemetryTracing((builder) =>
-                    {
-                        builder
-                            .AddSource(nameof(MessageReceiver))
-                            .AddZipkinExporter(b =>
-                            {
-                                var zipkinHostName = Environment.GetEnvironmentVariable("ZIPKIN_HOSTNAME") ?? "localhost";
-                                b.Endpoint = new Uri($"http://{zipkinHostName}:9411/api/v2/spans");
-                            });
-                    });
-                });
-    }
-}
+app.Run();

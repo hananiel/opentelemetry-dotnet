@@ -1,24 +1,34 @@
-name: docfx
+name: Build docfx
 
 on:
-  push:
-    branches: [ main, metrics ]
-  pull_request:
-    branches: [ main, metrics ]
+  workflow_call:
+
+permissions:
+  contents: read
 
 jobs:
-  build:
-    runs-on: windows-latest
+  run-docfx-build:
+    name: Build docfx
+    runs-on: windows-2025
 
     steps:
-    - name: check out code
-      uses: actions/checkout@v2
+    - name: Checkout code
+      uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      with:
+        filter: 'tree:0'
+        persist-credentials: false
+        show-progress: false
 
-    - name: install docfx
-      # specifying 2.58.5 version as latest release (2.58.8) has an issue
-      # https://github.com/dotnet/docfx/issues/7689
-      run: choco install docfx -y --version=2.58.5
+    - name: Setup .NET
+      uses: actions/setup-dotnet@0f4a354dd5547a28c70b7853dbd95d5b67886e73 # v6.1.0
 
-    - name: run .\build\docfx.cmd
-      shell: cmd
+    - name: Install docfx
+      shell: pwsh
+      env:
+        # renovate: datasource=nuget depName=docfx
+        DOCFX_VERSION: '2.78.5'
+      run: dotnet tool install -g docfx --version ${env:DOCFX_VERSION}
+
+    - name: Build docfx
+      shell: pwsh
       run: .\build\docfx.cmd

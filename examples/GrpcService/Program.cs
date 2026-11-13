@@ -1,39 +1,52 @@
-// <copyright file="Program.cs" company="OpenTelemetry Authors">
 // Copyright The OpenTelemetry Authors
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//     http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
-// </copyright>
+// SPDX-License-Identifier: Apache-2.0
 
-using Microsoft.AspNetCore.Hosting;
-using Microsoft.Extensions.Hosting;
+using Examples.GrpcService;
+using OpenTelemetry.Resources;
+using OpenTelemetry.Trace;
 
-namespace Examples.GrpcService
-{
-    public class Program
+var builder = WebApplication.CreateBuilder(args);
+
+// Add services to the container.
+builder.Services.AddGrpc();
+
+builder.Services.AddOpenTelemetry()
+    .WithTracing(tracerBuilder =>
     {
-        public static void Main(string[] args)
-        {
-            CreateHostBuilder(args).Build().Run();
-        }
+        tracerBuilder.ConfigureResource(r => r.AddService(
+            builder.Configuration.GetValue("ServiceName", defaultValue: "otel-test")))
+            .AddAspNetCoreInstrumentation();
 
-        // Additional configuration is required to successfully run gRPC on macOS.
-        // For instructions on how to configure Kestrel and gRPC clients on macOS, visit https://go.microsoft.com/fwlink/?linkid=2099682
-        public static IHostBuilder CreateHostBuilder(string[] args) =>
-            Host.CreateDefaultBuilder(args)
-                .ConfigureWebHostDefaults(webBuilder =>
+        var exporter = builder.Configuration.GetValue("UseExporter", defaultValue: "console").ToUpperInvariant();
+        switch (exporter)
+        {
+            case "OTLP":
+                tracerBuilder.AddOtlpExporter(otlpOptions =>
                 {
-                    webBuilder.UseStartup<Startup>();
-                    webBuilder.UseUrls("https://localhost:44335");
+                    otlpOptions.Endpoint = new Uri(builder.Configuration.GetValue("Otlp:Endpoint", defaultValue: "http://localhost:4317"));
                 });
-    }
+                break;
+            default:
+                tracerBuilder.AddConsoleExporter();
+                break;
+        }
+    });
+
+var app = builder.Build();
+
+// Configure the HTTP request pipeline.
+if (app.Environment.IsDevelopment())
+{
+    app.UseDeveloperExceptionPage();
 }
+
+app.UseRouting();
+
+app.MapGrpcService<GreeterService>();
+app.MapGet("/", () =>
+{
+    return Results.Text("Communication with gRPC endpoints must be made through a gRPC client. " +
+                      "To learn how to create a client, visit: https://go.microsoft.com/fwlink/?linkid=2086909");
+});
+
+app.Run();

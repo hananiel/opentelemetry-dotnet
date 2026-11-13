@@ -1,89 +1,107 @@
-// <copyright file="OtlpGrpcExporterBenchmarks.cs" company="OpenTelemetry Authors">
 // Copyright The OpenTelemetry Authors
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//     http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
-// </copyright>
+// SPDX-License-Identifier: Apache-2.0
 
 extern alias OpenTelemetryProtocol;
 
-using System;
 using System.Diagnostics;
-using System.Threading;
+using System.Net;
+#if NETFRAMEWORK
+using System.Net.Http;
+using System.Net.Http.Headers;
+#endif
 using BenchmarkDotNet.Attributes;
 using Benchmarks.Helper;
-using Grpc.Core;
-using Moq;
 using OpenTelemetry;
 using OpenTelemetry.Internal;
 using OpenTelemetryProtocol::OpenTelemetry.Exporter;
+using OpenTelemetryProtocol::OpenTelemetry.Exporter.OpenTelemetryProtocol.Implementation;
 using OpenTelemetryProtocol::OpenTelemetry.Exporter.OpenTelemetryProtocol.Implementation.ExportClient;
-using OtlpCollector = OpenTelemetryProtocol::Opentelemetry.Proto.Collector.Trace.V1;
+using OpenTelemetryProtocol::OpenTelemetry.Exporter.OpenTelemetryProtocol.Implementation.Transmission;
 
-namespace Benchmarks.Exporter
+namespace Benchmarks.Exporter;
+
+#pragma warning disable CA1001 // Types that own disposable fields should be disposable - handled by GlobalCleanup
+public class OtlpGrpcExporterBenchmarks
+#pragma warning restore CA1001 // Types that own disposable fields should be disposable - handled by GlobalCleanup
 {
-    [MemoryDiagnoser]
-    public class OtlpGrpcExporterBenchmarks
+    private OtlpTraceExporter? exporter;
+    private Activity? activity;
+    private CircularBuffer<Activity>? activityBatch;
+
+    [Params(1, 10, 20)]
+    public int NumberOfBatches { get; set; }
+
+    [Params(10000)]
+    public int NumberOfSpans { get; set; }
+
+    [GlobalSetup]
+    public void GlobalSetup()
     {
-        private OtlpTraceExporter exporter;
-        private Activity activity;
-        private CircularBuffer<Activity> activityBatch;
-
-        [Params(1, 10, 100)]
-        public int NumberOfBatches { get; set; }
-
-        [Params(10000)]
-        public int NumberOfSpans { get; set; }
-
-        [GlobalSetup]
-        public void GlobalSetup()
+        var options = new OtlpExporterOptions
         {
-            var mockClient = new Mock<OtlpCollector.TraceService.TraceServiceClient>();
-            mockClient
-                .Setup(m => m.Export(
-                    It.IsAny<OtlpCollector.ExportTraceServiceRequest>(),
-                    It.IsAny<Metadata>(),
-                    It.IsAny<DateTime?>(),
-                    It.IsAny<CancellationToken>()))
-                .Returns(new OtlpCollector.ExportTraceServiceResponse());
+            HttpClientFactory = () => new HttpClient(new StubHttpClientHandler(), true),
+        };
+        this.exporter = new OtlpTraceExporter(
+            options,
+            new SdkLimitOptions(),
+            new ExperimentalOptions(),
+#pragma warning disable CA2000 // Dispose objects before losing scope
+            new OtlpExporterTransmissionHandler(new OtlpGrpcExportClient(options, options.HttpClientFactory(), "opentelemetry.proto.collector.trace.v1.TraceService/Export"), options.TimeoutMilliseconds));
+#pragma warning restore CA2000 // Dispose objects before losing scope
 
-            var options = new OtlpExporterOptions();
-            this.exporter = new OtlpTraceExporter(
-                options,
-                new OtlpGrpcTraceExportClient(options, mockClient.Object));
+        this.activity = ActivityHelper.CreateTestActivity();
+        this.activityBatch = new CircularBuffer<Activity>(this.NumberOfSpans);
+    }
 
-            this.activity = ActivityHelper.CreateTestActivity();
-            this.activityBatch = new CircularBuffer<Activity>(this.NumberOfSpans);
-        }
+    [GlobalCleanup]
+    public void GlobalCleanup()
+    {
+        this.activity?.Dispose();
+        this.exporter?.Shutdown();
+        this.exporter?.Dispose();
+    }
 
-        [GlobalCleanup]
-        public void GlobalCleanup()
+    [Benchmark]
+    public void OtlpExporter_Batching()
+    {
+        for (var i = 0; i < this.NumberOfBatches; i++)
         {
-            this.exporter.Shutdown();
-            this.exporter.Dispose();
-        }
-
-        [Benchmark]
-        public void OtlpExporter_Batching()
-        {
-            for (int i = 0; i < this.NumberOfBatches; i++)
+            for (var c = 0; c < this.NumberOfSpans; c++)
             {
-                for (int c = 0; c < this.NumberOfSpans; c++)
-                {
-                    this.activityBatch.Add(this.activity);
-                }
-
-                this.exporter.Export(new Batch<Activity>(this.activityBatch, this.NumberOfSpans));
+                this.activityBatch!.Add(this.activity!);
             }
+
+            this.exporter!.Export(new Batch<Activity>(this.activityBatch!, this.NumberOfSpans));
         }
+    }
+
+    private sealed class StubHttpClientHandler : DelegatingHandler
+    {
+#if NET
+        protected override HttpResponseMessage Send(HttpRequestMessage request, CancellationToken cancellationToken) => CreateResponse();
+#endif
+
+        protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
+            => Task.FromResult(CreateResponse());
+
+        private static HttpResponseMessage CreateResponse()
+        {
+            var response = new HttpResponseMessage(HttpStatusCode.OK);
+
+#if NET
+            response.TrailingHeaders.Add("grpc-status", "0");
+#else
+            response.RequestMessage.Properties.Add("__ResponseTrailers", new ResponseTrailers()
+            {
+                { "grpc-status", "0" },
+            });
+#endif
+
+            return response;
+        }
+
+#if NETFRAMEWORK
+        private sealed class ResponseTrailers : HttpHeaders;
+#endif
     }
 }

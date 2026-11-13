@@ -1,60 +1,54 @@
-// <copyright file="OtelEnvResourceDetector.cs" company="OpenTelemetry Authors">
 // Copyright The OpenTelemetry Authors
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//     http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
-// </copyright>
+// SPDX-License-Identifier: Apache-2.0
 
-using System.Collections.Generic;
-using OpenTelemetry.Internal;
+using Microsoft.Extensions.Configuration;
 
-namespace OpenTelemetry.Resources
+namespace OpenTelemetry.Resources;
+
+internal sealed class OtelEnvResourceDetector : IResourceDetector
 {
-    internal class OtelEnvResourceDetector : IResourceDetector
+    public const string EnvVarKey = "OTEL_RESOURCE_ATTRIBUTES";
+    private const char AttributeListSplitter = ',';
+    private static readonly char[] AttributeKeyValueSplitter = ['='];
+
+    private readonly IConfiguration configuration;
+
+    public OtelEnvResourceDetector(IConfiguration configuration)
     {
-        public const string EnvVarKey = "OTEL_RESOURCE_ATTRIBUTES";
-        private const char AttributeListSplitter = ',';
-        private const char AttributeKeyValueSplitter = '=';
+        this.configuration = configuration;
+    }
 
-        public Resource Detect()
+    public Resource Detect()
+    {
+        var resource = Resource.Empty;
+
+        if (this.configuration.TryGetStringValue(EnvVarKey, out var envResourceAttributeValue))
         {
-            var resource = Resource.Empty;
-
-            if (EnvironmentVariableHelper.LoadString(EnvVarKey, out string envResourceAttributeValue))
-            {
-                var attributes = ParseResourceAttributes(envResourceAttributeValue);
-                resource = new Resource(attributes);
-            }
-
-            return resource;
+            var attributes = ParseResourceAttributes(envResourceAttributeValue);
+            resource = new Resource(attributes);
         }
 
-        private static IEnumerable<KeyValuePair<string, object>> ParseResourceAttributes(string resourceAttributes)
+        return resource;
+    }
+
+    private static List<KeyValuePair<string, object>> ParseResourceAttributes(string resourceAttributes)
+    {
+        var attributes = new List<KeyValuePair<string, object>>();
+
+        var rawAttributes = resourceAttributes.Split(AttributeListSplitter);
+        foreach (var rawKeyValuePair in rawAttributes)
         {
-            var attributes = new List<KeyValuePair<string, object>>();
-
-            string[] rawAttributes = resourceAttributes.Split(AttributeListSplitter);
-            foreach (string rawKeyValuePair in rawAttributes)
+            var keyValuePair = rawKeyValuePair.Split(AttributeKeyValueSplitter, 2);
+            if (keyValuePair.Length != 2)
             {
-                string[] keyValuePair = rawKeyValuePair.Split(AttributeKeyValueSplitter);
-                if (keyValuePair.Length != 2)
-                {
-                    continue;
-                }
-
-                attributes.Add(new KeyValuePair<string, object>(keyValuePair[0].Trim(), keyValuePair[1].Trim()));
+                continue;
             }
 
-            return attributes;
+            // Values are percent-encoded, which unlike URL (form) encoding does not turn '+' into a space.
+            var value = Uri.UnescapeDataString(keyValuePair[1].Trim());
+            attributes.Add(new KeyValuePair<string, object>(keyValuePair[0].Trim(), value));
         }
+
+        return attributes;
     }
 }

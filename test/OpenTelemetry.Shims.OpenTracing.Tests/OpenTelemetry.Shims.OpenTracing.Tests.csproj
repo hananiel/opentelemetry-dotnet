@@ -1,22 +1,26 @@
-﻿<Project Sdk="Microsoft.NET.Sdk">
+<Project Sdk="Microsoft.NET.Sdk">
+
   <PropertyGroup>
     <Description>Unit test project for OpenTelemetry.Shims.OpenTracing</Description>
-    <!-- OmniSharp/VS Code requires TargetFrameworks to be in descending order for IntelliSense and analysis. -->
-    <TargetFrameworks>net6.0;net5.0;netcoreapp3.1</TargetFrameworks>
+    <TargetFrameworks>$(TargetFrameworksForTests)</TargetFrameworks>
+    <!-- CS0618: Do not use Obsolete classes/methods. OpenTracing is deprecated and marked as Obsolete.-->
+    <NoWarn>$(NoWarn);CS0618</NoWarn>
   </PropertyGroup>
-
-  <ItemGroup>
-    <PackageReference Include="Microsoft.NET.Test.Sdk" Version="$(MicrosoftNETTestSdkPkgVer)" />
-    <PackageReference Include="Moq" Version="$(MoqPkgVer)" />
-    <PackageReference Include="xunit" Version="$(XUnitPkgVer)" />
-    <PackageReference Include="xunit.runner.visualstudio" Version="$(XUnitRunnerVisualStudioPkgVer)">
-      <PrivateAssets>all</PrivateAssets>
-      <IncludeAssets>runtime; build; native; contentfiles; analyzers</IncludeAssets>
-    </PackageReference>
-    <DotNetCliToolReference Include="dotnet-xunit" Version="$(DotNetXUnitCliVer)" />
-  </ItemGroup>
 
   <ItemGroup>
     <ProjectReference Include="$(RepoRoot)\src\OpenTelemetry.Shims.OpenTracing\OpenTelemetry.Shims.OpenTracing.csproj" />
   </ItemGroup>
+
+  <ItemGroup>
+    <Compile Include="$(RepoRoot)\test\OpenTelemetry.Tests\Shared\PropagatorsCollectionDefinition.cs" Link="Includes\PropagatorsCollectionDefinition.cs" />
+  </ItemGroup>
+
+  <ItemGroup Condition="'$(RunningDotNetPack)' != 'true'">
+    <ProjectReference Include="$(RepoRoot)\src\OpenTelemetry.Exporter.InMemory\OpenTelemetry.Exporter.InMemory.csproj" />
+  </ItemGroup>
+
+  <ItemGroup Condition="'$(RunningDotNetPack)' == 'true'">
+    <PackageReference Include="OpenTelemetry.Exporter.InMemory" />
+  </ItemGroup>
+
 </Project>

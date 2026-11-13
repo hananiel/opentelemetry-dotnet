@@ -1,33 +1,38 @@
-name: sanitycheck
+name: Lint - Spelling & Encoding
 
 on:
-  push:
-    branches: [ main, metrics ]
-  pull_request:
-    branches: [ main, metrics ]
+  workflow_call:
+
+permissions:
+  contents: read
 
 jobs:
-  misspell:
-    runs-on: ubuntu-latest
+  run-typos:
+    name: Check for typos
+    runs-on: ubuntu-26.04
 
     steps:
-    - name: check out code
-      uses: actions/checkout@v2
+    - name: Checkout code
+      uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      with:
+        filter: 'tree:0'
+        persist-credentials: false
+        show-progress: false
 
-    - name: install misspell
-      run: |
-        curl -L -o ./install-misspell.sh https://git.io/misspell
-        sh ./install-misspell.sh
+    - name: Check for typos
+      uses: crate-ci/typos@4c8b7f51ca60df14e3c5ca82770dfbbe6c3dae85 # v1.52.0
 
-    - name: run misspell
-      run: ./bin/misspell -error .
-
-  encoding:
-    runs-on: ubuntu-latest
+  run-sanitycheck:
+    name: Run sanity check
+    runs-on: ubuntu-26.04
 
     steps:
-    - name: check out code
-      uses: actions/checkout@v2
+    - name: Checkout code
+      uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      with:
+        filter: 'tree:0'
+        persist-credentials: false
+        show-progress: false
 
-    - name: detect non-ASCII encoding and trailing space
-      run: python3 ./build/sanitycheck.py
+    - name: Detect non-ASCII encoding and trailing space
+      run: python3 ./build/scripts/sanitycheck.py

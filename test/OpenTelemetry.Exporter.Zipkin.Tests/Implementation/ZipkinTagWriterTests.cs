@@ -1,0 +1,100 @@
+// Copyright The OpenTelemetry Authors
+// SPDX-License-Identifier: Apache-2.0
+
+using System.Text;
+using System.Text.Json;
+using OpenTelemetry.Exporter.Zipkin.Implementation;
+
+namespace OpenTelemetry.Exporter.Zipkin.Tests.Implementation;
+
+public class ZipkinTagWriterTests
+{
+    [Fact]
+    public void KvListTagIsWrittenAsJsonObjectString()
+    {
+        var kvList = new Dictionary<string, object?>
+        {
+            ["name"] = "acme",
+            ["tier"] = 2L,
+            ["nested"] = new Dictionary<string, string> { ["x"] = "y" },
+        };
+
+        var json = WriteTag("kvlist", kvList);
+
+        using var document = JsonDocument.Parse(json);
+        var tagValue = document.RootElement.GetProperty("kvlist").GetString();
+        Assert.NotNull(tagValue);
+
+        using var kvListDocument = JsonDocument.Parse(tagValue);
+        var root = kvListDocument.RootElement;
+
+        Assert.Equal("acme", root.GetProperty("name").GetString());
+
+        Assert.Equal("2", root.GetProperty("tier").GetString());
+
+        var nested = root.GetProperty("nested").GetString();
+        Assert.NotNull(nested);
+        using var nestedDocument = JsonDocument.Parse(nested);
+        Assert.Equal("y", nestedDocument.RootElement.GetProperty("x").GetString());
+    }
+
+    [Fact]
+    public void StringDictionaryTagIsWrittenAsJsonObjectString()
+    {
+        var dictionary = new Dictionary<string, string>
+        {
+            ["region"] = "eu",
+            ["env"] = "prod",
+        };
+
+        var json = WriteTag("labels", dictionary);
+
+        using var document = JsonDocument.Parse(json);
+        var tagValue = document.RootElement.GetProperty("labels").GetString();
+        Assert.NotNull(tagValue);
+
+        using var labelsDocument = JsonDocument.Parse(tagValue);
+        Assert.Equal("eu", labelsDocument.RootElement.GetProperty("region").GetString());
+        Assert.Equal("prod", labelsDocument.RootElement.GetProperty("env").GetString());
+    }
+
+#if NET
+    [Fact]
+    public void Utf8SpanFormattableTagIsWrittenUsingToString()
+    {
+        var json = WriteTag("key", new Utf8ValueWithToString("value"));
+
+        using var document = JsonDocument.Parse(json);
+        Assert.Equal("value", document.RootElement.GetProperty("key").GetString());
+    }
+#endif
+
+    private static string WriteTag(string key, object? value)
+    {
+        using var stream = new MemoryStream();
+        using var writer = new Utf8JsonWriter(stream);
+
+        var writerAlias = writer;
+        writerAlias.WriteStartObject();
+
+        Assert.True(ZipkinTagWriter.Instance.TryWriteTag(ref writerAlias, key, value));
+
+        writerAlias.WriteEndObject();
+        writerAlias.Flush();
+
+        return Encoding.UTF8.GetString(stream.ToArray());
+    }
+
+#if NET
+    private sealed class Utf8ValueWithToString(string value) : IUtf8SpanFormattable
+    {
+        public bool TryFormat(Span<byte> utf8Destination, out int bytesWritten, ReadOnlySpan<char> format, IFormatProvider? provider)
+        {
+            bytesWritten = 0;
+            return true;
+        }
+
+        public override string ToString() => value;
+    }
+#endif
+}

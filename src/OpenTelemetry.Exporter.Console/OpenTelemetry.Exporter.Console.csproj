@@ -1,15 +1,16 @@
 <Project Sdk="Microsoft.NET.Sdk">
 
   <PropertyGroup>
-    <!-- OmniSharp/VS Code requires TargetFrameworks to be in descending order for IntelliSense and analysis. -->
-    <TargetFrameworks>netstandard2.0;net461</TargetFrameworks>
+    <TargetFrameworks>$(TargetFrameworksForLibraries)</TargetFrameworks>
     <Description>Console exporter for OpenTelemetry .NET</Description>
     <PackageTags>$(PackageTags);Console;distributed-tracing</PackageTags>
     <MinVerTagPrefix>core-</MinVerTagPrefix>
+    <ReferenceSystemTextJsonPackages>true</ReferenceSystemTextJsonPackages>
+    <SupportsBrowserAndMobilePlatforms>true</SupportsBrowserAndMobilePlatforms>
   </PropertyGroup>
 
   <PropertyGroup>
-    <NoWarn>$(NoWarn),1591</NoWarn>
+    <NoWarn>$(NoWarn),CS1591</NoWarn>
   </PropertyGroup>
 
   <ItemGroup>
@@ -17,10 +18,14 @@
   </ItemGroup>
 
   <ItemGroup>
-    <Compile Include="$(RepoRoot)\src\OpenTelemetry\Internal\PeriodicExportingMetricReaderHelper.cs" Link="Includes\PeriodicExportingMetricReaderHelper.cs" />
-    <Compile Include="$(RepoRoot)\src\OpenTelemetry\Internal\ServiceProviderExtensions.cs" Link="Includes\ServiceProviderExtensions.cs" />
-    <Compile Include="$(RepoRoot)\src\OpenTelemetry.Api\Internal\Guard.cs" Link="Includes\Guard.cs" />
-    <Compile Include="$(RepoRoot)\src\OpenTelemetry.Api\Internal\SpanAttributeConstants.cs" Link="Includes\SpanAttributeConstants.cs" />
+    <Compile Include="$(RepoRoot)\src\Shared\MathExtensions.cs" Link="Includes\MathExtensions.cs" />
+    <Compile Include="$(RepoRoot)\src\Shared\Metrics\Base2ExponentialBucketHistogramHelper.cs" Link="Includes\Metrics\Base2ExponentialBucketHistogramHelper.cs" />
+    <Compile Include="$(RepoRoot)\src\Shared\PeriodicExportingMetricReaderHelper.cs" Link="Includes\PeriodicExportingMetricReaderHelper.cs" />
+    <Compile Include="$(RepoRoot)\src\Shared\TagWriter\*.cs" Link="Includes\TagWriter\%(Filename).cs" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <InternalsVisibleTo Include="OpenTelemetry.Exporter.Console.Tests" PublicKey="$(StrongNamePublicKey)" />
   </ItemGroup>
 
 </Project>

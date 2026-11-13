@@ -1,0 +1,529 @@
+// Copyright The OpenTelemetry Authors
+// SPDX-License-Identifier: Apache-2.0
+
+#if NETFRAMEWORK
+using System.Net.Http;
+#endif
+using System.Diagnostics.Tracing;
+using System.IO.Compression;
+using System.Net;
+using System.Text;
+using OpenTelemetry.Exporter.OpenTelemetryProtocol.Implementation;
+using OpenTelemetry.Exporter.OpenTelemetryProtocol.Implementation.ExportClient;
+using OpenTelemetry.Exporter.OpenTelemetryProtocol.Implementation.Transmission;
+using OpenTelemetry.Tests;
+
+namespace OpenTelemetry.Exporter.OpenTelemetryProtocol.Tests;
+
+[Collection(EventSourceCollectionDefinition.Name)]
+public class OtlpExportClientTests
+{
+    private const int MessageSizeLimit = 4 * 1024 * 1024;
+    private const string TruncationSuffix = "[TRUNCATED]";
+
+    [Fact]
+    public void TryGetResponseBody_NullHttpResponse_ReturnsNull()
+    {
+        // Arrange
+        HttpResponseMessage? httpResponse = null;
+        var cancellationToken = CancellationToken.None;
+
+        // Act
+        var actual = OtlpExportClient.TryGetResponseBody(httpResponse, OtlpExporterOptions.DefaultMaxResponseSizeBytes, cancellationToken);
+
+        // Assert
+        Assert.Null(actual);
+    }
+
+    [Fact]
+    public void TryGetResponseBody_HttpResponseWithoutContent_ReturnsCorrectResult()
+    {
+        // Arrange
+        using var httpResponse = new HttpResponseMessage() { Content = null };
+        var cancellationToken = CancellationToken.None;
+
+        // Act
+        var actual = OtlpExportClient.TryGetResponseBody(httpResponse, OtlpExporterOptions.DefaultMaxResponseSizeBytes, cancellationToken);
+
+        // Assert
+#if NETFRAMEWORK
+        Assert.Null(actual);
+#else
+        Assert.Equal(string.Empty, actual);
+#endif
+    }
+
+    [Theory]
+    [InlineData(0)]
+    [InlineData(1)]
+    [InlineData(256)]
+    [InlineData(1024)]
+    [InlineData((30 * 1024) - 1)]
+    [InlineData(30 * 1024)]
+    public void TryGetResponseBody_SmallContent_ReturnsFullContent(int length)
+    {
+        // Arrange
+        var expected = new string('A', length);
+        var cancellationToken = CancellationToken.None;
+
+        using var httpResponse = new HttpResponseMessage()
+        {
+            Content = new StringContent(expected),
+        };
+
+        // Act
+        var actual = OtlpExportClient.TryGetResponseBody(httpResponse, OtlpExporterOptions.DefaultMaxResponseSizeBytes, cancellationToken);
+
+        // Assert
+        Assert.Equal(expected, actual);
+    }
+
+    [Theory]
+    [InlineData(1)]
+    [InlineData(1024)]
+    [InlineData(2048)]
+    public void TryGetResponseBody_ContentExceedsLimit_ReturnsTruncatedContent(int excess)
+    {
+        // Arrange
+        var content = new string('C', MessageSizeLimit + excess);
+        var cancellationToken = CancellationToken.None;
+
+        using var httpResponse = new HttpResponseMessage()
+        {
+            Content = new StringContent(content),
+        };
+
+        // Act
+        var actual = OtlpExportClient.TryGetResponseBody(httpResponse, OtlpExporterOptions.DefaultMaxResponseSizeBytes, cancellationToken);
+
+        // Assert
+        Assert.NotNull(actual);
+        Assert.Equal(MessageSizeLimit + TruncationSuffix.Length, actual.Length);
+        Assert.Equal(new string('C', MessageSizeLimit) + TruncationSuffix, actual);
+    }
+
+    [Theory]
+    [InlineData(1)]
+    [InlineData(1024)]
+    [InlineData(2048)]
+    public void TryGetResponseBody_DecompressedContentExceedsLimit_ReturnsTruncatedContent(int excess)
+    {
+        // Arrange
+        var content = new string('G', MessageSizeLimit + excess);
+        var rawBytes = Encoding.UTF8.GetBytes(content);
+        var cancellationToken = CancellationToken.None;
+
+        using var memoryStream = new MemoryStream();
+
+        using (var compressor = new GZipStream(memoryStream, CompressionMode.Compress, leaveOpen: true))
+        {
+            compressor.Write(rawBytes, 0, rawBytes.Length);
+        }
+
+        memoryStream.Seek(0, SeekOrigin.Begin);
+
+        Assert.True(
+            memoryStream.Length < MessageSizeLimit,
+            $"The compressed message length {memoryStream.Length} is not less than {MessageSizeLimit}.");
+
+        using var compressed = new GZipStream(memoryStream, CompressionMode.Decompress, leaveOpen: true);
+
+        using var httpResponse = new HttpResponseMessage()
+        {
+            Content = new StreamContent(compressed),
+        };
+
+        // Act
+        var actual = OtlpExportClient.TryGetResponseBody(httpResponse, OtlpExporterOptions.DefaultMaxResponseSizeBytes, cancellationToken);
+
+        // Assert
+        Assert.NotNull(actual);
+        Assert.Equal(MessageSizeLimit + TruncationSuffix.Length, actual.Length);
+        Assert.Equal(new string('G', MessageSizeLimit) + TruncationSuffix, actual);
+    }
+
+    [Fact]
+    public void TryGetResponseBody_EmptyContent_ReturnsEmptyString()
+    {
+        // Arrange
+        var cancellationToken = CancellationToken.None;
+
+        using var httpResponse = new HttpResponseMessage()
+        {
+            Content = new StringContent(string.Empty),
+        };
+
+        // Act
+        var actual = OtlpExportClient.TryGetResponseBody(httpResponse, OtlpExporterOptions.DefaultMaxResponseSizeBytes, cancellationToken);
+
+        // Assert
+        Assert.Equal(string.Empty, actual);
+    }
+
+    [Fact]
+    public void TryGetResponseBody_ExceptionDuringRead_ReturnsNull()
+    {
+        // Arrange
+        var cancellationToken = CancellationToken.None;
+
+        using var httpResponse = new HttpResponseMessage()
+        {
+            Content = new ThrowingHttpContent(),
+        };
+
+        // Act
+        var actual = OtlpExportClient.TryGetResponseBody(httpResponse, OtlpExporterOptions.DefaultMaxResponseSizeBytes, cancellationToken);
+
+        // Assert
+        Assert.Null(actual);
+    }
+
+    [Fact]
+    public void TryGetResponseBody_CancellationTokenSignalled_ReturnsNull()
+    {
+        // Arrange
+        var cancellationToken = new CancellationToken(canceled: true);
+
+        using var httpResponse = new HttpResponseMessage()
+        {
+            Content = new StringContent("foo"),
+        };
+
+        // Act
+        var actual = OtlpExportClient.TryGetResponseBody(httpResponse, OtlpExporterOptions.DefaultMaxResponseSizeBytes, cancellationToken);
+
+        // Assert
+        Assert.Null(actual);
+    }
+
+    [Fact]
+    public void TryGetResponseBody_NonSeekableStream_ReturnsContent()
+    {
+        // Arrange
+        var expected = "non-seekable response body";
+        var cancellationToken = CancellationToken.None;
+
+        using var httpResponse = new HttpResponseMessage()
+        {
+            Content = new NonSeekableStreamContent(Encoding.UTF8.GetBytes(expected)),
+        };
+
+        // Act
+        var actual = OtlpExportClient.TryGetResponseBody(httpResponse, OtlpExporterOptions.DefaultMaxResponseSizeBytes, cancellationToken);
+
+        // Assert
+        Assert.Equal(expected, actual);
+    }
+
+    [Fact]
+    public void TryGetResponseBody_NonUtf8Charset_ReturnsCorrectlyDecodedContent()
+    {
+        // Arrange
+        var expected = "iso-8859-1 response body: caf\u00e9";
+        var cancellationToken = CancellationToken.None;
+        var iso8859 = Encoding.GetEncoding("iso-8859-1");
+
+        using var httpResponse = new HttpResponseMessage()
+        {
+            Content = new StringContent(expected, iso8859),
+        };
+
+        // Act
+        var actual = OtlpExportClient.TryGetResponseBody(httpResponse, OtlpExporterOptions.DefaultMaxResponseSizeBytes, cancellationToken);
+
+        // Assert
+        Assert.Equal(expected, actual);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void SendExportRequest_UnsuccessfulResponse_LimitsResponseBodyInDiagnosticLog(bool useGrpc)
+    {
+        // Arrange
+        const int HttpRequestFailedEventId = 17;
+
+        using var listener = new TestEventListener(OpenTelemetryProtocolExporterEventSource.Log, EventLevel.Error);
+
+        // The body is as large as the exporter accepts, but only a prefix of it belongs in a log message.
+        using var testHandler = new UnsuccessfulResponseHttpMessageHandler(new string('E', OtlpExporterOptions.DefaultMaxResponseSizeBytes));
+        using var httpClient = new HttpClient(testHandler, disposeHandler: false);
+
+        var options = new OtlpExporterOptions { Endpoint = new Uri("http://localhost:4317") };
+
+        OtlpExportClient exportClient = useGrpc
+            ? new OtlpGrpcExportClient(options, httpClient, string.Empty)
+            : new OtlpHttpExportClient(options, httpClient, string.Empty);
+
+        var payload = "hello world"u8.ToArray();
+
+        // Act
+        var response = exportClient.SendExportRequest(payload, payload.Length, DateTime.UtcNow.AddSeconds(10), TestContext.Current.CancellationToken);
+
+        // Assert
+        Assert.False(response.Success);
+
+        var logged = Assert.Single(listener.Messages, e => e.EventId == HttpRequestFailedEventId);
+        var loggedResponse = (string)logged.Payload![1]!;
+
+        Assert.Equal(new string('E', OtlpExportClient.MaxLoggedResponseSizeBytes) + TruncationSuffix, loggedResponse);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void SendExportRequest_NoResponse_TimesOutOnceDeadlineIsReached(bool useGrpc)
+    {
+        // Arrange
+        const int RequestTimedOutEventId = 19;
+
+        using var listener = new TestEventListener(OpenTelemetryProtocolExporterEventSource.Log, EventLevel.Warning);
+
+        // The timeout of the HttpClient is longer than the time left until the deadline
+        using var testHandler = new UnresponsiveHttpMessageHandler();
+        using var httpClient = new HttpClient(testHandler, disposeHandler: false) { Timeout = TimeSpan.FromSeconds(60) };
+
+        var options = new OtlpExporterOptions { Endpoint = new Uri("http://localhost:4317") };
+
+        OtlpExportClient exportClient = useGrpc
+            ? new OtlpGrpcExportClient(options, httpClient, string.Empty)
+            : new OtlpHttpExportClient(options, httpClient, string.Empty);
+
+        var payload = "hello world"u8.ToArray();
+
+        // Act
+        var response = exportClient.SendExportRequest(payload, payload.Length, DateTime.UtcNow.AddMilliseconds(250), TestContext.Current.CancellationToken);
+
+        // Assert
+        Assert.True(testHandler.RequestCanceled, "The request should be canceled when the deadline is reached.");
+        Assert.False(response.Success);
+        Assert.True(RetryHelper.ShouldRetryRequest(response), "A request which timed out should be retryable.");
+        Assert.Contains(listener.Messages, e => e.EventId == RequestTimedOutEventId);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void SendExportRequest_InfiniteHttpClientTimeout_DoesNotCancelRequest(bool useGrpc)
+    {
+        // Arrange
+        const int HttpRequestFailedEventId = 17;
+        const int RequestTimedOutEventId = 19;
+
+        using var listener = new TestEventListener(OpenTelemetryProtocolExporterEventSource.Log, EventLevel.Warning);
+
+        using var testHandler = new UnsuccessfulResponseHttpMessageHandler("error");
+        using var httpClient = new HttpClient(testHandler, disposeHandler: false) { Timeout = Timeout.InfiniteTimeSpan };
+
+        var options = new OtlpExporterOptions { Endpoint = new Uri("http://localhost:4317") };
+
+        OtlpExportClient exportClient = useGrpc
+            ? new OtlpGrpcExportClient(options, httpClient, string.Empty)
+            : new OtlpHttpExportClient(options, httpClient, string.Empty);
+
+        var payload = "hello world"u8.ToArray();
+
+        // The transmission handler has no deadline when HttpClient.Timeout is infinite
+        using var transmissionHandler = new OtlpExporterTransmissionHandler(exportClient, httpClient.Timeout.TotalMilliseconds);
+        var deadlineUtc = transmissionHandler.GetDeadlineUtc(DateTime.MaxValue);
+
+        // Act
+        var response = exportClient.SendExportRequest(payload, payload.Length, deadlineUtc, TestContext.Current.CancellationToken);
+
+        // Assert
+        Assert.False(response.Success);
+        Assert.Contains(listener.Messages, e => e.EventId == HttpRequestFailedEventId);
+        Assert.DoesNotContain(listener.Messages, e => e.EventId == RequestTimedOutEventId);
+    }
+
+    [Fact]
+    public void GetTimeUntilDeadline_OnlyHasNoDeadlineForMaxValue()
+    {
+        var maximumDelay = TimeSpan.FromMilliseconds(int.MaxValue);
+
+        // No deadline
+        Assert.Null(OtlpExportClient.GetTimeUntilDeadline(DateTime.MaxValue));
+
+        // A deadline which has passed
+        Assert.True(OtlpExportClient.GetTimeUntilDeadline(DateTime.UtcNow.AddMilliseconds(-1)) <= TimeSpan.Zero);
+
+        // The longest delay CancelAfter() accepts is still a deadline
+        var remaining = OtlpExportClient.GetTimeUntilDeadline(DateTime.UtcNow.Add(maximumDelay));
+        Assert.NotNull(remaining);
+        Assert.InRange(remaining.Value, maximumDelay - TimeSpan.FromMinutes(1), maximumDelay);
+
+        using var cts = new CancellationTokenSource();
+        cts.CancelAfter(remaining.Value);
+        Assert.False(cts.IsCancellationRequested);
+
+        // A deadline further away than that is reached sooner, rather than not at all
+        Assert.Equal(maximumDelay, OtlpExportClient.GetTimeUntilDeadline(DateTime.UtcNow.AddDays(30)));
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void SendExportRequest_DeadlineHasPassed_DoesNotSendRequest(bool useGrpc)
+    {
+        // Arrange
+        const int RequestTimedOutEventId = 19;
+
+        using var listener = new TestEventListener(OpenTelemetryProtocolExporterEventSource.Log, EventLevel.Warning);
+
+        using var testHandler = new UnsuccessfulResponseHttpMessageHandler("error");
+        using var httpClient = new HttpClient(testHandler, disposeHandler: false) { Timeout = Timeout.InfiniteTimeSpan };
+
+        var options = new OtlpExporterOptions { Endpoint = new Uri("http://localhost:4317") };
+
+        OtlpExportClient exportClient = useGrpc
+            ? new OtlpGrpcExportClient(options, httpClient, string.Empty)
+            : new OtlpHttpExportClient(options, httpClient, string.Empty);
+
+        var payload = "hello world"u8.ToArray();
+
+        // Act
+        var response = exportClient.SendExportRequest(payload, payload.Length, DateTime.UtcNow.AddMilliseconds(-1), TestContext.Current.CancellationToken);
+
+        // Assert
+        Assert.False(response.Success);
+        Assert.Equal(0, testHandler.RequestCount);
+        Assert.Contains(listener.Messages, e => e.EventId == RequestTimedOutEventId);
+    }
+
+    private sealed class UnresponsiveHttpMessageHandler : HttpMessageHandler
+    {
+        // Eventually give up so that a test fails, rather than hangs, if the request is not canceled
+        private static readonly TimeSpan MaximumWait = TimeSpan.FromSeconds(30);
+
+        public bool RequestCanceled { get; private set; }
+
+        protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
+        {
+            try
+            {
+                await Task.Delay(MaximumWait, cancellationToken).ConfigureAwait(false);
+            }
+            catch (OperationCanceledException)
+            {
+                this.RequestCanceled = true;
+                throw;
+            }
+
+            return new(HttpStatusCode.OK);
+        }
+
+#if NET
+        protected override HttpResponseMessage Send(HttpRequestMessage request, CancellationToken cancellationToken)
+        {
+            this.RequestCanceled = cancellationToken.WaitHandle.WaitOne(MaximumWait);
+            cancellationToken.ThrowIfCancellationRequested();
+
+            return new(HttpStatusCode.OK);
+        }
+#endif
+    }
+
+    private sealed class UnsuccessfulResponseHttpMessageHandler : HttpMessageHandler
+    {
+        private readonly string body;
+
+        public UnsuccessfulResponseHttpMessageHandler(string body)
+        {
+            this.body = body;
+        }
+
+        public int RequestCount { get; private set; }
+
+        protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
+            => Task.FromResult(this.CreateResponse(cancellationToken));
+
+#if NET
+        protected override HttpResponseMessage Send(HttpRequestMessage request, CancellationToken cancellationToken)
+            => this.CreateResponse(cancellationToken);
+#endif
+
+        private HttpResponseMessage CreateResponse(CancellationToken cancellationToken)
+        {
+            this.RequestCount++;
+
+            // Like a real handler, do not send a request which has already been canceled
+            cancellationToken.ThrowIfCancellationRequested();
+            return new(HttpStatusCode.BadRequest) { Content = new StringContent(this.body) };
+        }
+    }
+
+    private sealed class ThrowingHttpContent : HttpContent
+    {
+        protected override Task SerializeToStreamAsync(Stream stream, TransportContext? context)
+            => throw new InvalidOperationException("Test exception");
+
+#if NET
+        protected override Task SerializeToStreamAsync(Stream stream, TransportContext? context, CancellationToken cancellationToken)
+            => throw new InvalidOperationException("Test exception");
+#endif
+
+        protected override bool TryComputeLength(out long length)
+        {
+            length = 0;
+            return false;
+        }
+    }
+
+    private sealed class NonSeekableStreamContent : HttpContent
+    {
+        private readonly byte[] data;
+
+        public NonSeekableStreamContent(byte[] data)
+        {
+            this.data = data;
+            this.Headers.ContentType = new System.Net.Http.Headers.MediaTypeHeaderValue("text/plain") { CharSet = "utf-8" };
+        }
+
+        protected override Task SerializeToStreamAsync(Stream stream, TransportContext? context)
+            => stream.WriteAsync(this.data, 0, this.data.Length);
+
+#if NET
+        protected override Task SerializeToStreamAsync(Stream stream, TransportContext? context, CancellationToken cancellationToken)
+            => stream.WriteAsync(this.data, cancellationToken).AsTask();
+
+        protected override Stream CreateContentReadStream(CancellationToken cancellationToken)
+            => new NonSeekableStream(new MemoryStream(this.data));
+#endif
+
+        protected override Task<Stream> CreateContentReadStreamAsync()
+            => Task.FromResult<Stream>(new NonSeekableStream(new MemoryStream(this.data)));
+
+        protected override bool TryComputeLength(out long length)
+        {
+            length = 0;
+            return false;
+        }
+    }
+
+    private sealed class NonSeekableStream(Stream inner) : Stream
+    {
+        public override bool CanRead => true;
+
+        public override bool CanSeek => false;
+
+        public override bool CanWrite => false;
+
+        public override long Length => throw new NotSupportedException();
+
+        public override long Position
+        {
+            get => throw new NotSupportedException();
+            set => throw new NotSupportedException();
+        }
+
+        public override void Flush() => inner.Flush();
+
+        public override int Read(byte[] buffer, int offset, int count) => inner.Read(buffer, offset, count);
+
+        public override long Seek(long offset, SeekOrigin origin) => throw new NotSupportedException();
+
+        public override void SetLength(long value) => throw new NotSupportedException();
+
+        public override void Write(byte[] buffer, int offset, int count) => throw new NotSupportedException();
+    }
+}

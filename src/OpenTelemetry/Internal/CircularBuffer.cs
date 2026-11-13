@@ -1,180 +1,168 @@
-// <copyright file="CircularBuffer.cs" company="OpenTelemetry Authors">
 // Copyright The OpenTelemetry Authors
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//     http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
-// </copyright>
+// SPDX-License-Identifier: Apache-2.0
 
+using System.Diagnostics;
 using System.Runtime.CompilerServices;
-using System.Threading;
 
-namespace OpenTelemetry.Internal
+namespace OpenTelemetry.Internal;
+
+/// <summary>
+/// Lock-free implementation of single-reader multi-writer circular buffer.
+/// </summary>
+/// <typeparam name="T">The type of the underlying value.</typeparam>
+internal sealed class CircularBuffer<T>
+    where T : class
 {
+    private readonly T?[] trait;
+
+    // The head is written by every producer and the tail by the single consumer.
+    // They are kept on separate cache lines so that a consumer advancing the tail
+    // does not invalidate the line the producers are competing for, and vice versa.
+    private PaddedLong head;
+    private PaddedLong tail;
+
     /// <summary>
-    /// Lock-free implementation of single-reader multi-writer circular buffer.
+    /// Initializes a new instance of the <see cref="CircularBuffer{T}"/> class.
     /// </summary>
-    /// <typeparam name="T">The type of the underlying value.</typeparam>
-    internal class CircularBuffer<T>
-        where T : class
+    /// <param name="capacity">The capacity of the circular buffer, must be a positive integer.</param>
+    public CircularBuffer(int capacity)
     {
-        private readonly T[] trait;
-        private long head;
-        private long tail;
+        Guard.ThrowIfOutOfRange(capacity, min: 1);
 
-        /// <summary>
-        /// Initializes a new instance of the <see cref="CircularBuffer{T}"/> class.
-        /// </summary>
-        /// <param name="capacity">The capacity of the circular buffer, must be a positive integer.</param>
-        public CircularBuffer(int capacity)
+        this.Capacity = capacity;
+        this.trait = new T[capacity];
+    }
+
+    /// <summary>
+    /// Gets the capacity of the <see cref="CircularBuffer{T}"/>.
+    /// </summary>
+    public int Capacity { get; }
+
+    /// <summary>
+    /// Gets the number of items contained in the <see cref="CircularBuffer{T}"/>.
+    /// </summary>
+    public int Count
+    {
+        get
         {
-            Guard.ThrowIfOutOfRange(capacity, min: 1);
-
-            this.Capacity = capacity;
-            this.trait = new T[capacity];
+            var tailSnapshot = Volatile.Read(ref this.tail.Value);
+            return (int)(Volatile.Read(ref this.head.Value) - tailSnapshot);
         }
+    }
 
-        /// <summary>
-        /// Gets the capacity of the <see cref="CircularBuffer{T}"/>.
-        /// </summary>
-        public int Capacity { get; }
+    /// <summary>
+    /// Gets the number of items added to the <see cref="CircularBuffer{T}"/>.
+    /// </summary>
+    public long AddedCount => Volatile.Read(ref this.head.Value);
 
-        /// <summary>
-        /// Gets the number of items contained in the <see cref="CircularBuffer{T}"/>.
-        /// </summary>
-        public int Count
+    /// <summary>
+    /// Gets the number of items removed from the <see cref="CircularBuffer{T}"/>.
+    /// </summary>
+    public long RemovedCount => Volatile.Read(ref this.tail.Value);
+
+    /// <summary>
+    /// Adds the specified item to the buffer.
+    /// </summary>
+    /// <param name="value">The value to add.</param>
+    /// <returns>
+    /// Returns <c>true</c> if the item was added to the buffer successfully;
+    /// <c>false</c> if the buffer is full.
+    /// </returns>
+    public bool Add(T value)
+        => this.TryAdd(value, maxSpinCount: 0, out _);
+
+    /// <summary>
+    /// Attempts to add the specified item to the buffer.
+    /// </summary>
+    /// <param name="value">The value to add.</param>
+    /// <param name="maxSpinCount">The maximum allowed spin count, when set to a negative number or zero, will spin indefinitely.</param>
+    /// <returns>
+    /// Returns <c>true</c> if the item was added to the buffer successfully;
+    /// <c>false</c> if the buffer is full or the spin count exceeded <paramref name="maxSpinCount"/>.
+    /// </returns>
+    public bool TryAdd(T value, int maxSpinCount)
+        => this.TryAdd(value, maxSpinCount, out _);
+
+    /// <summary>
+    /// Attempts to add the specified item to the buffer.
+    /// </summary>
+    /// <param name="value">The value to add.</param>
+    /// <param name="maxSpinCount">The maximum allowed spin count, when set to a negative number or zero, will spin indefinitely.</param>
+    /// <param name="count">
+    /// When this method returns <c>true</c>, the number of items in the buffer
+    /// immediately after <paramref name="value"/> was added. Items may be read
+    /// concurrently, so the true count at the time of the add may have been
+    /// higher but is never lower than this value. When this method returns
+    /// <c>false</c>, zero.
+    /// </param>
+    /// <returns>
+    /// Returns <c>true</c> if the item was added to the buffer successfully;
+    /// <c>false</c> if the buffer is full or the spin count exceeded <paramref name="maxSpinCount"/>.
+    /// </returns>
+    public bool TryAdd(T value, int maxSpinCount, out long count)
+    {
+        Debug.Assert(value != null, "value was null");
+
+        var spinCountDown = maxSpinCount;
+
+        while (true)
         {
-            get
+            var tailSnapshot = Volatile.Read(ref this.tail.Value);
+            var headSnapshot = Volatile.Read(ref this.head.Value);
+
+            if (headSnapshot - tailSnapshot >= this.Capacity)
             {
-                var tailSnapshot = this.tail;
-                return (int)(this.head - tailSnapshot);
+                count = 0;
+                return false; // buffer is full
             }
+
+            if (Interlocked.CompareExchange(ref this.head.Value, headSnapshot + 1, headSnapshot) != headSnapshot)
+            {
+                if (maxSpinCount > 0 && spinCountDown-- == 0)
+                {
+                    count = 0;
+                    return false; // exceeded maximum spin count
+                }
+
+                continue;
+            }
+
+            Volatile.Write(ref this.trait[headSnapshot % this.Capacity], value);
+
+            // Re-read the tail after the add: the tail only ever grows, so this
+            // count can be lower than the true count at the moment of the add but
+            // never higher. While the reader is idle the tail cannot move and the
+            // count is exact, which is what BatchExportProcessor relies on to
+            // detect the add that brings the queue up to the export batch size.
+            count = headSnapshot + 1 - Volatile.Read(ref this.tail.Value);
+            return true;
         }
+    }
 
-        /// <summary>
-        /// Gets the number of items added to the <see cref="CircularBuffer{T}"/>.
-        /// </summary>
-        public long AddedCount => this.head;
-
-        /// <summary>
-        /// Gets the number of items removed from the <see cref="CircularBuffer{T}"/>.
-        /// </summary>
-        public long RemovedCount => this.tail;
-
-        /// <summary>
-        /// Adds the specified item to the buffer.
-        /// </summary>
-        /// <param name="value">The value to add.</param>
-        /// <returns>
-        /// Returns <c>true</c> if the item was added to the buffer successfully;
-        /// <c>false</c> if the buffer is full.
-        /// </returns>
-        public bool Add(T value)
+    /// <summary>
+    /// Reads an item from the <see cref="CircularBuffer{T}"/>.
+    /// </summary>
+    /// <remarks>
+    /// This function is not reentrant-safe, only one reader is allowed at any given time.
+    /// Warning: There is no bounds check in this method. Do not call unless you have verified Count > 0.
+    /// </remarks>
+    /// <returns>Item read.</returns>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public T Read()
+    {
+        var tail = Volatile.Read(ref this.tail.Value);
+        var index = (int)(tail % this.Capacity);
+        while (true)
         {
-            Guard.ThrowIfNull(value);
-
-            while (true)
+            var previous = Interlocked.Exchange(ref this.trait[index], null);
+            if (previous == null)
             {
-                var tailSnapshot = this.tail;
-                var headSnapshot = this.head;
-
-                if (headSnapshot - tailSnapshot >= this.Capacity)
-                {
-                    return false; // buffer is full
-                }
-
-                var head = Interlocked.CompareExchange(ref this.head, headSnapshot + 1, headSnapshot);
-                if (head != headSnapshot)
-                {
-                    continue;
-                }
-
-                var index = (int)(head % this.Capacity);
-                this.trait[index] = value;
-                return true;
-            }
-        }
-
-        /// <summary>
-        /// Attempts to add the specified item to the buffer.
-        /// </summary>
-        /// <param name="value">The value to add.</param>
-        /// <param name="maxSpinCount">The maximum allowed spin count, when set to a negative number or zero, will spin indefinitely.</param>
-        /// <returns>
-        /// Returns <c>true</c> if the item was added to the buffer successfully;
-        /// <c>false</c> if the buffer is full or the spin count exceeded <paramref name="maxSpinCount"/>.
-        /// </returns>
-        public bool TryAdd(T value, int maxSpinCount)
-        {
-            if (maxSpinCount <= 0)
-            {
-                return this.Add(value);
+                // If we got here it means a writer isn't done.
+                continue;
             }
 
-            Guard.ThrowIfNull(value);
-
-            var spinCountDown = maxSpinCount;
-
-            while (true)
-            {
-                var tailSnapshot = this.tail;
-                var headSnapshot = this.head;
-
-                if (headSnapshot - tailSnapshot >= this.Capacity)
-                {
-                    return false; // buffer is full
-                }
-
-                var head = Interlocked.CompareExchange(ref this.head, headSnapshot + 1, headSnapshot);
-                if (head != headSnapshot)
-                {
-                    if (spinCountDown-- == 0)
-                    {
-                        return false; // exceeded maximum spin count
-                    }
-
-                    continue;
-                }
-
-                var index = (int)(head % this.Capacity);
-                this.trait[index] = value;
-                return true;
-            }
-        }
-
-        /// <summary>
-        /// Reads an item from the <see cref="CircularBuffer{T}"/>.
-        /// </summary>
-        /// <remarks>
-        /// This function is not reentrant-safe, only one reader is allowed at any given time.
-        /// Warning: There is no bounds check in this method. Do not call unless you have verified Count > 0.
-        /// </remarks>
-        /// <returns>Item read.</returns>
-        [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        public T Read()
-        {
-            var index = (int)(this.tail % this.Capacity);
-            while (true)
-            {
-                var value = this.trait[index];
-                if (value == null)
-                {
-                    // If we got here it means a writer isn't done.
-                    continue;
-                }
-
-                this.trait[index] = null;
-                this.tail++;
-                return value;
-            }
+            Volatile.Write(ref this.tail.Value, tail + 1);
+            return previous;
         }
     }
 }

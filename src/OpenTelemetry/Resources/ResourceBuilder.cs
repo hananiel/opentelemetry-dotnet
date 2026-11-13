@@ -1,112 +1,209 @@
-// <copyright file="ResourceBuilder.cs" company="OpenTelemetry Authors">
 // Copyright The OpenTelemetry Authors
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//     http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
-// </copyright>
+// SPDX-License-Identifier: Apache-2.0
 
-using System.Collections.Generic;
+using System.Diagnostics;
 using OpenTelemetry.Internal;
 
-namespace OpenTelemetry.Resources
+namespace OpenTelemetry.Resources;
+
+/// <summary>
+/// Contains methods for building <see cref="Resource"/> instances.
+/// </summary>
+public class ResourceBuilder
 {
-    /// <summary>
-    /// Contains methods for building <see cref="Resource"/> instances.
-    /// </summary>
-    public class ResourceBuilder
+    internal readonly List<IResourceDetector> ResourceDetectors = [];
+    private static readonly Resource DefaultResource = PrepareDefaultResource();
+
+    private ResourceBuilder()
     {
-        private readonly List<Resource> resources = new();
+    }
 
-        private ResourceBuilder()
+    internal IServiceProvider? ServiceProvider { get; set; }
+
+    /// <summary>
+    /// Creates a <see cref="ResourceBuilder"/> instance with default attributes
+    /// added. See <a
+    /// href="https://github.com/open-telemetry/semantic-conventions/blob/main/docs/resource/README.md#semantic-attributes-with-sdk-provided-default-value">resource
+    /// semantic conventions</a> for details.
+    /// Additionally it adds resource attributes parsed from OTEL_RESOURCE_ATTRIBUTES, OTEL_SERVICE_NAME environment variables
+    /// to a <see cref="ResourceBuilder"/> following the <a
+    /// href="https://github.com/open-telemetry/opentelemetry-specification/blob/main/specification/resource/sdk.md#specifying-resource-information-via-an-environment-variable">Resource
+    /// SDK</a>.
+    /// </summary>
+    /// <returns>Created <see cref="ResourceBuilder"/>.</returns>
+    public static ResourceBuilder CreateDefault()
+        => new ResourceBuilder()
+            .AddResource(DefaultResource)
+            .AddTelemetrySdk()
+            .AddEnvironmentVariableDetector();
+
+    /// <summary>
+    /// Creates an empty <see cref="ResourceBuilder"/> instance.
+    /// </summary>
+    /// <returns>Created <see cref="ResourceBuilder"/>.</returns>
+    public static ResourceBuilder CreateEmpty()
+        => new();
+
+    /// <summary>
+    /// Clears the <see cref="Resource"/>s added to the builder.
+    /// </summary>
+    /// <returns><see cref="ResourceBuilder"/> for chaining.</returns>
+    public ResourceBuilder Clear()
+    {
+        this.ResourceDetectors.Clear();
+
+        return this;
+    }
+
+    /// <summary>
+    /// Build a merged <see cref="Resource"/> from all the <see cref="Resource"/>s added to the builder.
+    /// </summary>
+    /// <returns><see cref="Resource"/>.</returns>
+    public Resource Build()
+    {
+        var finalResource = Resource.Empty;
+
+        foreach (var resourceDetector in this.ResourceDetectors)
         {
-        }
+            if (resourceDetector is ResolvingResourceDetector resolvingResourceDetector)
+            {
+                resolvingResourceDetector.Resolve(this.ServiceProvider);
+            }
 
-        private static Resource DefaultResource { get; } = new Resource(new Dictionary<string, object>
-        {
-            [ResourceSemanticConventions.AttributeServiceName] = "unknown_service"
-                + (string.IsNullOrWhiteSpace(System.Diagnostics.Process.GetCurrentProcess().ProcessName)
-                ? string.Empty :
-                ":" + System.Diagnostics.Process.GetCurrentProcess().ProcessName),
-        });
-
-        /// <summary>
-        /// Creates a <see cref="ResourceBuilder"/> instance with Default
-        /// service.name added. See <a
-        /// href="https://github.com/open-telemetry/opentelemetry-specification/tree/main/specification/resource/semantic_conventions#semantic-attributes-with-sdk-provided-default-value">resource
-        /// semantic conventions</a> for details.
-        /// Additionally it adds resource attributes parsed from OTEL_RESOURCE_ATTRIBUTES, OTEL_SERVICE_NAME environment variables
-        /// to a <see cref="ResourceBuilder"/> following the <a
-        /// href="https://github.com/open-telemetry/opentelemetry-specification/blob/main/specification/resource/sdk.md#specifying-resource-information-via-an-environment-variable">Resource
-        /// SDK</a>.
-        /// </summary>
-        /// <returns>Created <see cref="ResourceBuilder"/>.</returns>
-        public static ResourceBuilder CreateDefault()
-            => new ResourceBuilder().AddResource(DefaultResource).AddEnvironmentVariableDetector();
-
-        /// <summary>
-        /// Creates an empty <see cref="ResourceBuilder"/> instance.
-        /// </summary>
-        /// <returns>Created <see cref="ResourceBuilder"/>.</returns>
-        public static ResourceBuilder CreateEmpty()
-            => new();
-
-        /// <summary>
-        /// Clears the <see cref="Resource"/>s added to the builder.
-        /// </summary>
-        /// <returns><see cref="ResourceBuilder"/> for chaining.</returns>
-        public ResourceBuilder Clear()
-        {
-            this.resources.Clear();
-
-            return this;
-        }
-
-        /// <summary>
-        /// Build a merged <see cref="Resource"/> from all the <see cref="Resource"/>s added to the builder.
-        /// </summary>
-        /// <returns><see cref="Resource"/>.</returns>
-        public Resource Build()
-        {
-            Resource finalResource = Resource.Empty;
-
-            foreach (Resource resource in this.resources)
+            var resource = resourceDetector.Detect();
+            if (resource != null)
             {
                 finalResource = finalResource.Merge(resource);
             }
-
-            return finalResource;
         }
 
-        public ResourceBuilder AddDetector(IResourceDetector resourceDetector)
+        return finalResource;
+    }
+
+    /// <summary>
+    /// Add a <see cref="IResourceDetector"/> to the builder.
+    /// </summary>
+    /// <param name="resourceDetector"><see cref="IResourceDetector"/>.</param>
+    /// <returns>Supplied <see cref="ResourceBuilder"/> for call chaining.</returns>
+    public ResourceBuilder AddDetector(IResourceDetector resourceDetector)
+    {
+        Guard.ThrowIfNull(resourceDetector);
+
+        this.ResourceDetectors.Add(resourceDetector);
+
+        return this;
+    }
+
+    /// <summary>
+    /// Add a <see cref="IResourceDetector"/> to the builder which will be resolved using the application <see cref="IServiceProvider"/>.
+    /// </summary>
+    /// <param name="resourceDetectorFactory">Resource detector factory.</param>
+    /// <returns>Supplied <see cref="ResourceBuilder"/> for call chaining.</returns>
+    public ResourceBuilder AddDetector(Func<IServiceProvider, IResourceDetector> resourceDetectorFactory)
+    {
+        Guard.ThrowIfNull(resourceDetectorFactory);
+
+        return this.AddDetectorInternal(sp =>
         {
-            Guard.ThrowIfNull(resourceDetector);
-
-            Resource resource = resourceDetector.Detect();
-
-            if (resource != null)
+            if (sp == null)
             {
-                this.resources.Add(resource);
+                throw new NotSupportedException("IResourceDetector factory pattern is not supported when calling ResourceBuilder.Build() directly.");
             }
 
-            return this;
+            return resourceDetectorFactory(sp);
+        });
+    }
+
+    internal ResourceBuilder AddDetectorInternal(Func<IServiceProvider?, IResourceDetector> resourceDetectorFactory)
+    {
+        Guard.ThrowIfNull(resourceDetectorFactory);
+
+        this.ResourceDetectors.Add(new ResolvingResourceDetector(resourceDetectorFactory));
+
+        return this;
+    }
+
+    internal ResourceBuilder AddResource(Resource resource)
+    {
+        Guard.ThrowIfNull(resource);
+
+        this.ResourceDetectors.Add(new WrapperResourceDetector(resource));
+
+        return this;
+    }
+
+    private static Resource PrepareDefaultResource()
+    {
+        var defaultServiceName = "unknown_service";
+
+        string? processName = GetProcessName();
+
+        if (processName is { Length: > 0 })
+        {
+            defaultServiceName = $"{defaultServiceName}:{processName}";
         }
 
-        internal ResourceBuilder AddResource(Resource resource)
+        return new Resource(
+            [new(ResourceSemanticConventions.AttributeServiceName, defaultServiceName)],
+            SchemaUrls.Get(SemanticConventionsVersion.Current));
+
+        static string? GetProcessName()
         {
-            Guard.ThrowIfNull(resource);
+#if NET
+            if (OperatingSystem.IsBrowser())
+            {
+                return null;
+            }
+#endif
 
-            this.resources.Add(resource);
+            try
+            {
+                using var process = Process.GetCurrentProcess();
+                return process.ProcessName;
+            }
+            catch
+            {
+                // GetCurrentProcess can throw PlatformNotSupportedException
+                return null;
+            }
+        }
+    }
 
-            return this;
+    internal sealed class WrapperResourceDetector : IResourceDetector
+    {
+        private readonly Resource resource;
+
+        public WrapperResourceDetector(Resource resource)
+        {
+            this.resource = resource;
+        }
+
+        public Resource Detect() => this.resource;
+    }
+
+    private sealed class ResolvingResourceDetector : IResourceDetector
+    {
+        private readonly Func<IServiceProvider?, IResourceDetector> resourceDetectorFactory;
+        private IResourceDetector? resourceDetector;
+
+        public ResolvingResourceDetector(Func<IServiceProvider?, IResourceDetector> resourceDetectorFactory)
+        {
+            this.resourceDetectorFactory = resourceDetectorFactory;
+        }
+
+        public void Resolve(IServiceProvider? serviceProvider) =>
+            this.resourceDetector = this.resourceDetectorFactory(serviceProvider)
+                ?? throw new InvalidOperationException("ResourceDetector factory did not return a ResourceDetector instance.");
+
+        public Resource Detect()
+        {
+            var detector = this.resourceDetector;
+
+            Debug.Assert(detector != null, "detector was null");
+
+#pragma warning disable CA1508 // Avoid dead conditional code
+            return detector?.Detect() ?? Resource.Empty;
+#pragma warning restore CA1508 // Avoid dead conditional code
         }
     }
 }

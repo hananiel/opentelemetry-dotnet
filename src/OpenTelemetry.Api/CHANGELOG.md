@@ -1,6 +1,583 @@
 # Changelog
 
+This file contains individual changes for the OpenTelemetry.Api package. For
+highlights and announcements covering all components see: [Release
+Notes](../../RELEASENOTES.md).
+
 ## Unreleased
+
+## 1.21.0
+
+Released 2026-Nov-11
+
+* Update `System.Diagnostics.DiagnosticSource` dependency to `11.0.0`
+  for all target frameworks.
+  ([#8066](https://github.com/open-telemetry/opentelemetry-dotnet/pull/8066))
+
+## 1.21.0-rc.2
+
+Released 2026-Nov-09
+
+* Improve traceparent extraction throughput on .NET.
+  ([#8095](https://github.com/open-telemetry/opentelemetry-dotnet/pull/8095))
+
+* Changed `EnvironmentVariableCarrier` snapshots to preserve environment variable
+  names, preventing extraction from non-normalized aliases and collisions with
+  normalized names. Process environment snapshots now follow the platform's
+  case-sensitivity rules.
+  ([#8098](https://github.com/open-telemetry/opentelemetry-dotnet/pull/8098))
+
+* The experimental APIs previously covered by `OTEL1005`
+  (`EnvironmentVariableCarrier`) are now stable.
+  ([#8044](https://github.com/open-telemetry/opentelemetry-dotnet/pull/8044))
+
+## 1.21.0-rc.1
+
+Released 2026-Oct-28
+
+## 1.20.1
+
+Released 2026-Oct-20
+
+## 1.20.1-rc.1
+
+Released 2026-Oct-20
+
+* Fixed `TracerProvider.GetTracer` caching a new tracer for each call with equal
+  array-valued scope tags.
+  ([#7960](https://github.com/open-telemetry/opentelemetry-dotnet/pull/7960))
+
+* **Breaking Change** Dropped support for `net8.0` and `net9.0`.
+  ([#6899](https://github.com/open-telemetry/opentelemetry-dotnet/pull/6899))
+
+* Update `System.Diagnostics.DiagnosticSource` dependency to `11.0.0-rc.3.26522.148`
+  for all target frameworks.
+  ([#6899](https://github.com/open-telemetry/opentelemetry-dotnet/pull/6899))
+
+* Add full support for W3C Trace Context Level 2 grammar.
+  ([#6899](https://github.com/open-telemetry/opentelemetry-dotnet/pull/6899))
+
+* Add support for .NET 11.0.
+  ([#6899](https://github.com/open-telemetry/opentelemetry-dotnet/pull/6899))
+
+## 1.20.0
+
+Released 2026-Oct-15
+
+## 1.20.0-rc.1
+
+Released 2026-Oct-15
+
+* Added `Logger.SchemaUrl` and a `LoggerProvider.GetLogger` overload accepting
+  a schema URL parameter using the new `LoggerOptions` type.
+  ([#7727](https://github.com/open-telemetry/opentelemetry-dotnet/pull/7727))
+
+* **Breaking change** (pre-release only versions): `LoggerProvider`'s
+  protected `TryCreateLogger(string? name, out Logger? logger)` extensibility
+  method has been replaced by `TryCreateLogger(LoggerOptions options, out
+  Logger? logger)`. Custom `LoggerProvider` subclasses that override the
+  previous overload must update to override the new one; the old overload is
+  no longer called.
+  ([#7727](https://github.com/open-telemetry/opentelemetry-dotnet/pull/7727))
+
+* Optimize performance of `BaggagePropagator.Inject` on .NET Framework using
+  lookup tables.
+  ([#7947](https://github.com/open-telemetry/opentelemetry-dotnet/pull/7947))
+
+## 1.19.1
+
+Released 2026-Sep-21
+
+## 1.19.1-rc.1
+
+Released 2026-Sep-21
+
+## 1.19.0
+
+Released 2026-Sep-18
+
+## 1.19.0-rc.1
+
+Released 2026-Sep-18
+
+* Reduced allocations when creating log record attributes from an array.
+  ([#7699](https://github.com/open-telemetry/opentelemetry-dotnet/pull/7699))
+
+* Reduced allocations when setting baggage through the `params` overload.
+  ([#7697](https://github.com/open-telemetry/opentelemetry-dotnet/pull/7697))
+
+* Reduced allocations when constructing `SpanAttributes` from an array.
+  ([#7698](https://github.com/open-telemetry/opentelemetry-dotnet/pull/7698))
+
+* Fixed parsing of an inbound `tracestate` header whose member value trimmed
+  to an empty value that previously threw an `IndexOutOfRangeException`
+  internally and could silently truncate the tracestate.
+  ([#7756](https://github.com/open-telemetry/opentelemetry-dotnet/pull/7756))
+
+## 1.18.0
+
+Released 2026-Aug-21
+
+## 1.18.0-rc.1
+
+Released 2026-Aug-21
+
+* Avoid formatting exceptions and creating exception attributes when
+  `RecordException` is called on a span that is not recorded.
+  ([#7669](https://github.com/open-telemetry/opentelemetry-dotnet/pull/7669))
+
+## 1.17.0
+
+Released 2026-Jul-16
+
+## 1.17.0-rc.1
+
+Released 2026-Jul-16
+
+* Fixed `TraceContextPropagator` to normalize empty `tracestate` header values
+  to `null` when extracting trace context.
+  ([#7407](https://github.com/open-telemetry/opentelemetry-dotnet/pull/7407),
+  [#7433](https://github.com/open-telemetry/opentelemetry-dotnet/pull/7433))
+
+* The library is now marked as trim and AOT compatible.
+  ([#7441](https://github.com/open-telemetry/opentelemetry-dotnet/pull/7441))
+
+* **Experimental (pre-release builds only):** Updated `EnvironmentVariableCarrier.Get`
+  to read only the normalized environment variable name, following the updated
+  [environment variable carrier specification](https://github.com/open-telemetry/opentelemetry-specification/pull/5144).
+  Non-normalized carrier keys are no longer matched, even when they would
+  normalize to the requested key.
+  ([#7410](https://github.com/open-telemetry/opentelemetry-dotnet/pull/7410))
+
+* **Experimental (pre-release builds only):** Updated `EnvironmentVariableCarrier`
+  key normalization to replace an empty key with a single underscore (`_`).
+  ([#7424](https://github.com/open-telemetry/opentelemetry-dotnet/pull/7424))
+
+* Updated `tracestate` key validation to comply with the W3C Trace Context
+  Level 2 grammar.
+  ([#7469](https://github.com/open-telemetry/opentelemetry-dotnet/pull/7469))
+
+## 1.16.0
+
+Released 2026-Jun-10
+
+## 1.16.0-rc.1
+
+Released 2026-Jun-10
+
+* **Experimental (pre-release builds only):**
+  Add support for using environment variables as context propagation carriers.
+  ([#7174](https://github.com/open-telemetry/opentelemetry-dotnet/pull/7174))
+
+* Fix `BaggagePropagator` to correctly follow Key and Value Encoding rules as per
+  the [W3C Baggage specification](https://www.w3.org/TR/baggage/#key-and-value-encoding).
+  [#7051](https://github.com/open-telemetry/opentelemetry-dotnet/pull/7051)
+
+* Update `TraceContextPropagator` to support the W3C randomness flag.
+  ([#7301](https://github.com/open-telemetry/opentelemetry-dotnet/pull/7301))
+
+* Fixed `TraceContextPropagator` to deduplicate duplicate `tracestate` keys
+  instead of discarding the entire `tracestate` header.
+  ([#7309](https://github.com/open-telemetry/opentelemetry-dotnet/pull/7309))
+
+* **Breaking change** (pre-release only versions): The default value of
+  the `Timestamp` property on `LogRecordData` has changed from `DateTime.UtcNow`
+  to `DateTime.MinValue`. `DateTime.MinValue` represents an unset timestamp as
+  defined by the OpenTelemetry specification. Callers of the [Logs API](https://github.com/open-telemetry/opentelemetry-specification/blob/main/specification/logs/api.md)
+  who relied on the timestamp being populated automatically must now set
+  `Timestamp = DateTime.UtcNow` explicitly on their `LogRecordData` instance.
+  ([#7045](https://github.com/open-telemetry/opentelemetry-dotnet/pull/7045))
+
+* Added `ObservedTimestamp` property to `LogRecordData`. Note that `LogRecordData`
+  is only public in pre-release versions of the package.
+  ([#6979](https://github.com/open-telemetry/opentelemetry-dotnet/pull/6979))
+
+## 1.15.3
+
+Released 2026-Apr-21
+
+* Fix baggage and trace headers not respecting the maximum length in some cases
+  to resolve [GHSA-g94r-2vxg-569j](https://github.com/advisories/GHSA-g94r-2vxg-569j).
+  ([#7061](https://github.com/open-telemetry/opentelemetry-dotnet/pull/7061))
+
+* Improve efficiency of parsing of baggage and B3 propagation headers
+  to resolve [GHSA-g94r-2vxg-569j](https://github.com/advisories/GHSA-g94r-2vxg-569j).
+  ([#7061](https://github.com/open-telemetry/opentelemetry-dotnet/pull/7061))
+
+* **Breaking change:** Fixed `tracestate` parsing to reject keys that do not
+  begin with a lowercase letter, including keys beginning with digits, to
+  align with the W3C Trace Context specification.
+  ([#7065](https://github.com/open-telemetry/opentelemetry-dotnet/pull/7065))
+
+* Fixed `BaggagePropagator` to trim optional whitespace (OWS) around `=`
+  separators when parsing the `baggage` header, as required by the
+  [W3C Baggage specification](https://www.w3.org/TR/baggage/).
+  ([#7009](https://github.com/open-telemetry/opentelemetry-dotnet/pull/7009))
+
+* Fixed `BaggagePropagator` to strip baggage properties (e.g. `;metadata`)
+  from values when parsing the `baggage` header.
+  ([#7009](https://github.com/open-telemetry/opentelemetry-dotnet/pull/7009))
+
+## 1.15.2
+
+Released 2026-Apr-08
+
+## 1.15.1
+
+Released 2026-Mar-27
+
+* **Breaking change:** The Baggage API implements the latest [Baggage API
+  specification](https://github.com/open-telemetry/opentelemetry-specification/blob/v1.36.0/specification/baggage/api.md),
+  which disallows empty baggage names and treats baggage names and values as case
+  sensitive.
+  ([#6931](https://github.com/open-telemetry/opentelemetry-dotnet/pull/6931))
+
+## 1.15.0
+
+Released 2026-Jan-21
+
+* Added a new overload for `TracerProvider.GetTracer` which accepts an optional
+  `string? schemaUrl` parameter, allowing a schema URL to be set on the `Tracer`.
+  ([#6736](https://github.com/open-telemetry/opentelemetry-dotnet/pull/6736))
+
+## 1.14.0
+
+Released 2025-Nov-12
+
+* **Breaking Change** NuGet packages now use the Sigstore bundle format
+  (`.sigstore.json`) for digital signatures instead of separate signature
+  (`.sig`) and certificate (`.pem`) files. This requires cosign 3.0 or later
+  for verification. See the [Digital signing
+  section](../../README.md#digital-signing) for updated verification instructions.
+  ([#6623](https://github.com/open-telemetry/opentelemetry-dotnet/pull/6623))
+
+* Update `System.Diagnostics.DiagnosticSource` dependency to `10.0.0`
+  for all target frameworks.
+  ([#6667](https://github.com/open-telemetry/opentelemetry-dotnet/pull/6667))
+
+## 1.14.0-rc.1
+
+Released 2025-Oct-21
+
+* Add support for .NET 10.0.
+  ([#6307](https://github.com/open-telemetry/opentelemetry-dotnet/pull/6307))
+
+* Update `System.Diagnostics.DiagnosticSource` dependency to `10.0.0-rc.2.25502.107`
+  for all target frameworks.
+  ([#6307](https://github.com/open-telemetry/opentelemetry-dotnet/pull/6307))
+
+## 1.13.1
+
+Released 2025-Oct-09
+
+## 1.13.0
+
+Released 2025-Oct-01
+
+* Added `AddLink(SpanContext, SpanAttributes?)` to `TelemetrySpan` to support
+  linking spans and associating optional attributes for advanced trace relationships.
+  ([#6305](https://github.com/open-telemetry/opentelemetry-dotnet/pull/6305))
+
+* Experimental (only in pre-release versions): Added the `EventName` property
+  to `LogRecordData`
+  ([#6306](https://github.com/open-telemetry/opentelemetry-dotnet/pull/6306))
+
+## 1.12.0
+
+Released 2025-Apr-29
+
+* Added a new overload for `TracerProvider.GetTracer` which accepts an optional
+  `IEnumerable<KeyValuePair<string, object?>>? tags` parameter, allowing
+  additional attributes to be associated with the `Tracer`.
+  ([#6137](https://github.com/open-telemetry/opentelemetry-dotnet/pull/6137))
+
+## 1.11.2
+
+Released 2025-Mar-04
+
+* Revert optimize performance of `TraceContextPropagator.Extract` introduced
+  in #5749 to resolve [GHSA-8785-wc3w-h8q6](https://github.com/open-telemetry/opentelemetry-dotnet/security/advisories/GHSA-8785-wc3w-h8q6).
+  ([#6161](https://github.com/open-telemetry/opentelemetry-dotnet/pull/6161))
+
+## 1.11.1
+
+Released 2025-Jan-22
+
+## 1.11.0
+
+Released 2025-Jan-15
+
+## 1.11.0-rc.1
+
+Released 2024-Dec-11
+
+## 1.10.0
+
+Released 2024-Nov-12
+
+* Updated `System.Diagnostics.DiagnosticSource` package version to
+  `9.0.0`.
+  ([#5967](https://github.com/open-telemetry/opentelemetry-dotnet/pull/5967))
+
+## 1.10.0-rc.1
+
+Released 2024-Nov-01
+
+## 1.10.0-beta.1
+
+Released 2024-Sep-30
+
+* **Breaking change:** CompositeTextMapPropagator.Fields now returns a
+  unioned set of fields from all combined propagators. Previously this always
+  returned an empty set.
+  ([#5745](https://github.com/open-telemetry/opentelemetry-dotnet/pull/5745))
+
+* Optimize performance of `TraceContextPropagator.Extract`.
+  ([#5749](https://github.com/open-telemetry/opentelemetry-dotnet/pull/5749))
+
+* Obsoleted the `ActivityExtensions.GetStatus` and
+  `ActivityExtensions.SetStatus` extension methods. Users should migrate to the
+  `System.Diagnostics.DiagnosticSource`
+  [Activity.SetStatus](https://learn.microsoft.com/dotnet/api/system.diagnostics.activity.setstatus)
+  API for setting the status and
+  [Activity.Status](https://learn.microsoft.com/dotnet/api/system.diagnostics.activity.status)
+  &
+  [Activity.StatusDescription](https://learn.microsoft.com/dotnet/api/system.diagnostics.activity.statusdescription)
+  APIs for reading the status of an `Activity` instance.
+  ([#5781](https://github.com/open-telemetry/opentelemetry-dotnet/pull/5781))
+
+* Updated `System.Diagnostics.DiagnosticSource` package version to
+  `9.0.0-rc.1.24431.7`.
+  ([#5853](https://github.com/open-telemetry/opentelemetry-dotnet/pull/5853))
+
+* Obsoleted the `ActivityExtensions.RecordException` extension method. Users
+  should migrate to the `System.Diagnostics.DiagnosticSource`
+  [Activity.AddException](https://learn.microsoft.com/dotnet/api/system.diagnostics.activity.addexception)
+  API for adding exceptions on an `Activity` instance.
+  ([#5841](https://github.com/open-telemetry/opentelemetry-dotnet/pull/5841))
+
+## 1.9.0
+
+Released 2024-Jun-14
+
+* **Breaking change:** Revert space character encoding change from `+` to `%20`
+  for baggage item values from [#5303](https://github.com/open-telemetry/opentelemetry-dotnet/pull/5303)
+  ([#5687](https://github.com/open-telemetry/opentelemetry-dotnet/pull/5687))
+
+## 1.9.0-rc.1
+
+Released 2024-Jun-07
+
+* The experimental APIs previously covered by `OTEL1000` (`LoggerProvider`,
+  `LoggerProviderBuilder`, & `IDeferredLoggerProviderBuilder`) are now part of
+  the public API and supported in stable builds.
+  ([#5648](https://github.com/open-telemetry/opentelemetry-dotnet/pull/5648))
+
+## 1.9.0-alpha.1
+
+Released 2024-May-20
+
+* **Breaking change:** Fix space character encoding from `+` to `%20`
+  for baggage item values when propagating baggage as defined in
+  [W3C Baggage propagation format specification](https://www.w3.org/TR/baggage/).
+  ([#5303](https://github.com/open-telemetry/opentelemetry-dotnet/pull/5303))
+
+## 1.8.1
+
+Released 2024-Apr-17
+
+## 1.8.0
+
+Released 2024-Apr-02
+
+## 1.8.0-rc.1
+
+Released 2024-Mar-27
+
+## 1.8.0-beta.1
+
+Released 2024-Mar-14
+
+## 1.7.0
+
+Released 2023-Dec-08
+
+## 1.7.0-rc.1
+
+Released 2023-Nov-29
+
+* Updated `System.Diagnostics.DiagnosticSource` package version to
+  `8.0.0`.
+  ([#5051](https://github.com/open-telemetry/opentelemetry-dotnet/pull/5051))
+
+## 1.7.0-alpha.1
+
+Released 2023-Oct-16
+
+* Fixed a bug which caused `Tracer.StartRootSpan` to generate a child span if a
+  trace was running (`Activity.Current != null`).
+  ([#4890](https://github.com/open-telemetry/opentelemetry-dotnet/pull/4890))
+
+* Added a `Tracer` cache inside of `TracerProvider` to prevent repeated calls to
+  `GetTracer` from leaking memory.
+  ([#4906](https://github.com/open-telemetry/opentelemetry-dotnet/pull/4906))
+
+* Fix `TraceContextPropagator` by validating the first digit of the hex-encoded
+  `trace-flags` field of the `traceparent` header.
+  ([#4893](https://github.com/open-telemetry/opentelemetry-dotnet/pull/4893))
+
+## 1.6.0
+
+Released 2023-Sep-05
+
+## 1.6.0-rc.1
+
+Released 2023-Aug-21
+
+## 1.6.0-alpha.1
+
+Released 2023-Jul-12
+
+* Updated `System.Diagnostics.DiagnosticSource` package version to `7.0.2`.
+  ([#4576](https://github.com/open-telemetry/opentelemetry-dotnet/pull/4576))
+
+* **Breaking change:** In order to make `RuntimeContext` compatible with
+  ahead-of-time compilation (AOT), `RuntimeContext.ContextSlotType` can only be
+  assigned one of the following types: `AsyncLocalRuntimeContextSlot<>`,
+  `ThreadLocalRuntimeContextSlot<>`, and `RemotingRuntimeContextSlot<>`. A
+  `System.NotSupportedException` will be thrown if you try to assign any type
+  other than the three types mentioned.
+  ([#4542](https://github.com/open-telemetry/opentelemetry-dotnet/pull/4542))
+
+* **Experimental (pre-release builds only):** Added [Logs Bridge
+  API](https://github.com/open-telemetry/opentelemetry-specification/blob/976432b74c565e8a84af3570e9b82cb95e1d844c/specification/logs/bridge-api.md)
+  implementation (`LoggerProviderBuilder`, `LoggerProvider`, `Logger`, etc.).
+  ([#4433](https://github.com/open-telemetry/opentelemetry-dotnet/pull/4433),
+  [#4735](https://github.com/open-telemetry/opentelemetry-dotnet/pull/4735))
+
+## 1.5.1
+
+Released 2023-Jun-26
+
+## 1.5.0
+
+Released 2023-Jun-05
+
+## 1.5.0-rc.1
+
+Released 2023-May-25
+
+## 1.5.0-alpha.2
+
+Released 2023-Mar-31
+
+## 1.5.0-alpha.1
+
+Released 2023-Mar-07
+
+## 1.4.0
+
+Released 2023-Feb-24
+
+## 1.4.0-rc.4
+
+Released 2023-Feb-10
+
+## 1.4.0-rc.3
+
+Released 2023-Feb-01
+
+## 1.4.0-rc.2
+
+Released 2023-Jan-09
+
+## 1.4.0-rc.1
+
+Released 2022-Dec-12
+
+* Updated to System.Diagnostics.DiagnosticSource version `7.0.0`.
+
+## 1.4.0-beta.3
+
+Released 2022-Nov-07
+
+* Updated to System.Diagnostics.DiagnosticSource version `7.0.0-rc.2.22472.3`.
+
+## 1.4.0-beta.2
+
+Released 2022-Oct-17
+
+## 1.4.0-beta.1
+
+Released 2022-Sep-29
+
+* Updated to System.Diagnostics.DiagnosticSource version `7.0.0-rc.1.22426.10`.
+([#3698](https://github.com/open-telemetry/opentelemetry-dotnet/pull/3698))
+
+## 1.4.0-alpha.2
+
+Released 2022-Aug-18
+
+* Updated to System.Diagnostics.DiagnosticSource preview version 7.0.0.
+
+  With this update, applications targeting .NET 5 and lower will receive a
+  warning at build time as described [here](https://github.com/dotnet/runtime/pull/72518)
+  (note: building using older versions of the .NET SDK produces an error at
+  build time). This is because .NET 5 reached EOL in May 2022 and .NET
+  Core 3.1 reaches EOL in December 2022. End of support
+  dates for .NET are published
+  [here](https://dotnet.microsoft.com/download/dotnet).
+
+  There is no guarantee that System.Diagnostics.DiagnosticSource will continue
+  to work on older versions of .NET. However, the build warning can be
+  suppressed by setting the `SuppressTfmSupportBuildWarnings` MSBuild property.
+
+  This does not affect applications targeting .NET Framework.
+  [#3539](https://github.com/open-telemetry/opentelemetry-dotnet/pull/3539)
+
+## 1.4.0-alpha.1
+
+Released 2022-Aug-02
+
+* Add `Activity.RecordException` overload accepting additional attributes to
+  add to the `ActivityEvent`.
+  [#3433](https://github.com/open-telemetry/opentelemetry-dotnet/pull/3433)
+
+## 1.3.0
+
+Released 2022-Jun-03
+
+## 1.3.0-rc.2
+
+Released 2022-June-1
+
+* `B3Propagator` class from `OpenTelemetry.Extensions.Propagators` namespace has
+  been deprecated and moved as is to a new `OpenTelemetry.Extensions.Propagators`
+  namespace, shipped as part of the `OpenTelemetry.Extensions.Propagators` package.
+  It will be removed in the next major release, see issue [#3259](https://github.com/open-telemetry/opentelemetry-dotnet/issues/3259)
+
+## 1.3.0-beta.2
+
+Released 2022-May-16
+
+## 1.3.0-beta.1
+
+Released 2022-Apr-15
+
+* Removes .NET Framework 4.6.1. The minimum .NET Framework
+  version supported is .NET 4.6.2. ([#3190](https://github.com/open-telemetry/opentelemetry-dotnet/issues/3190))
+
+## 1.2.0
+
+Released 2022-Apr-15
+
+## 1.2.0-rc5
+
+Released 2022-Apr-12
+
+## 1.2.0-rc4
+
+Released 2022-Mar-30
 
 ## 1.2.0-rc3
 
@@ -123,7 +700,7 @@ Released 2021-Jan-29
   the `Status` (otel.status_code) tag (added on `Activity` using the `SetStatus`
   extension) will now be set as the `UNSET`, `OK`, or `ERROR` string
   representation instead of the `0`, `1`, or `2` integer representation.
-  ([#1579](https://github.com/open-telemetry/opentelemetry-dotnet/pull/1579) &
+  ([#1579](https://github.com/open-telemetry/opentelemetry-dotnet/pull/1579)
   [#1620](https://github.com/open-telemetry/opentelemetry-dotnet/pull/1620))
 * Metrics API/SDK support is in an experimental state and is not recommended for
   production use. All metric APIs have been marked with the `Obsolete`
@@ -166,7 +743,7 @@ Released 2020-Nov-5
   ([#1413](https://github.com/open-telemetry/opentelemetry-dotnet/pull/1413))
 * Moving grpc status and helper to grpc project
   ([#1422](https://github.com/open-telemetry/opentelemetry-dotnet/pull/1422))
-* Renamed TextMapPropagator to TraceContextPropagator, CompositePropapagor to
+* Renamed TextMapPropagator to TraceContextPropagator, CompositePropagator to
   CompositeTextMapPropagator. IPropagator is renamed to TextMapPropagator and
   changed from interface to abstract class.
   ([#1427](https://github.com/open-telemetry/opentelemetry-dotnet/pull/1427))
@@ -226,7 +803,7 @@ Released 2020-08-28
     header
     ([#1048](https://github.com/open-telemetry/opentelemetry-dotnet/pull/1048))
 * Removed `DistributedContext` as it is no longer part of the spec
-  ([#1048](https://github.com/open-telemetry/opentelemetry-dotnet/pull/1048)))
+  ([#1048](https://github.com/open-telemetry/opentelemetry-dotnet/pull/1048))
 * Renaming from `ot` to `otel`
   ([#1046](https://github.com/open-telemetry/opentelemetry-dotnet/pull/1046))
 * Added `RuntimeContext` API

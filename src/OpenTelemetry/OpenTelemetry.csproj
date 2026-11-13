@@ -1,24 +1,53 @@
-﻿<Project Sdk="Microsoft.NET.Sdk">
+<Project Sdk="Microsoft.NET.Sdk">
+
   <PropertyGroup>
-    <!-- OmniSharp/VS Code requires TargetFrameworks to be in descending order for IntelliSense and analysis. -->
-    <TargetFrameworks>netstandard2.0;net461</TargetFrameworks>
+    <TargetFrameworks>$(TargetFrameworksForLibrariesExtended)</TargetFrameworks>
     <Description>OpenTelemetry .NET SDK</Description>
-    <!--
-    TODO: Disable this exception, and actually do document all public API.
-    -->
-    <NoWarn>$(NoWarn),1591,CS0618</NoWarn>
     <MinVerTagPrefix>core-</MinVerTagPrefix>
+    <NoWarn>$(NoWarn);CA1815</NoWarn> <!-- CA1815: Override equals and operator equals on value types - https://github.com/open-telemetry/opentelemetry-dotnet/issues/6278 -->
+    <SupportsBrowserAndMobilePlatforms>true</SupportsBrowserAndMobilePlatforms>
+    <EnableConfigurationBindingGenerator>true</EnableConfigurationBindingGenerator>
   </PropertyGroup>
 
   <ItemGroup>
-    <PackageReference Include="System.Collections.Immutable" Version="$(SystemCollectionsImmutablePkgVer)" />
-    <PackageReference Include="System.Reflection.Emit.Lightweight" Version="$(SystemReflectionEmitLightweightPkgVer)" />
-    <PackageReference Include="Microsoft.Extensions.Logging" Version="$(MicrosoftExtensionsLoggingPkgVer)" />
-    <PackageReference Include="Microsoft.Extensions.Logging.Configuration" Version="$(MicrosoftExtensionsLoggingConfigurationPkgVer)" />
+    <PackageReference Include="Microsoft.Extensions.Configuration.EnvironmentVariables" />
+    <PackageReference Include="Microsoft.Extensions.Diagnostics.Abstractions" />
+    <PackageReference Include="Microsoft.Extensions.Logging.Configuration" />
   </ItemGroup>
 
   <ItemGroup>
-    <ProjectReference Include="$(RepoRoot)\src\OpenTelemetry.Api\OpenTelemetry.Api.csproj" />
+    <ProjectReference Include="$(RepoRoot)\src\OpenTelemetry.Api.ProviderBuilderExtensions\OpenTelemetry.Api.ProviderBuilderExtensions.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Compile Include="$(RepoRoot)\src\Shared\AssemblyVersionExtensions.cs" Link="Includes\AssemblyVersionExtensions.cs" />
+    <Compile Include="$(RepoRoot)\src\Shared\BitOperations.cs" Link="Includes\BitOperations.cs" />
+    <Compile Include="$(RepoRoot)\src\Shared\Configuration\*.cs" Link="Includes\Configuration\%(Filename).cs" />
+    <Compile Include="$(RepoRoot)\src\Shared\DoubleExtensions.cs" Link="Includes\DoubleExtensions.cs" />
+    <Compile Include="$(RepoRoot)\src\Shared\Options\*.cs" Link="Includes\Options\%(Filename).cs" />
+    <Compile Include="$(RepoRoot)\src\Shared\ResourceSemanticConventions.cs" Link="Includes\ResourceSemanticConventions.cs" />
+    <Compile Include="$(RepoRoot)\src\Shared\SchemaUrls.cs" Link="Includes\SchemaUrls.cs" />
+    <Compile Include="$(RepoRoot)\src\Shared\Shims\NullableAttributes.cs" Link="Includes\Shims\NullableAttributes.cs" />
+    <Compile Include="$(RepoRoot)\src\Shared\StopwatchExtensions.cs" Link="Includes\StopwatchExtensions.cs" />
+    <Compile Include="$(RepoRoot)\src\Shared\StringBuilderCache.cs" Link="Includes\StringBuilderCache.cs" />
+    <Compile Include="$(RepoRoot)\src\Shared\ThreadSafeRandom.cs" Link="Includes\ThreadSafeRandom.cs" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <InternalsVisibleTo Include="OpenTelemetry.Exporter.Console" PublicKey="$(StrongNamePublicKey)" />
+    <InternalsVisibleTo Include="OpenTelemetry.Exporter.InMemory" PublicKey="$(StrongNamePublicKey)" />
+    <InternalsVisibleTo Include="OpenTelemetry.Exporter.OpenTelemetryProtocol" PublicKey="$(StrongNamePublicKey)" />
+    <InternalsVisibleTo Include="OpenTelemetry.Exporter.OpenTelemetryProtocol.FuzzTests" PublicKey="$(StrongNamePublicKey)" />
+    <InternalsVisibleTo Include="OpenTelemetry.Exporter.OpenTelemetryProtocol.Tests" PublicKey="$(StrongNamePublicKey)" />
+    <InternalsVisibleTo Include="OpenTelemetry.Exporter.Prometheus.AspNetCore" PublicKey="$(StrongNamePublicKey)" />
+    <InternalsVisibleTo Include="OpenTelemetry.Exporter.Prometheus.AspNetCore.Tests" PublicKey="$(StrongNamePublicKey)" />
+    <InternalsVisibleTo Include="OpenTelemetry.Exporter.Prometheus.HttpListener.Tests" PublicKey="$(StrongNamePublicKey)" />
+    <InternalsVisibleTo Include="OpenTelemetry.Extensions.Hosting" PublicKey="$(StrongNamePublicKey)" />
+    <InternalsVisibleTo Include="OpenTelemetry.Extensions.Hosting.Tests" PublicKey="$(StrongNamePublicKey)" />
+    <InternalsVisibleTo Include="OpenTelemetry.FuzzTests" PublicKey="$(StrongNamePublicKey)" />
+    <InternalsVisibleTo Include="OpenTelemetry.Tests" PublicKey="$(StrongNamePublicKey)" />
+    <InternalsVisibleTo Include="OpenTelemetry.Tests.Stress.Metrics" PublicKey="$(StrongNamePublicKey)" />
+    <InternalsVisibleTo Include="Benchmarks" PublicKey="$(StrongNamePublicKey)" />
   </ItemGroup>
 
 </Project>

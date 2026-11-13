@@ -23,7 +23,37 @@ comment:
   require_changes: no
 
 ignore:
-  - "docs/**/*"
-  - "examples/**/*"
-  - "test/**/*"
   - "**.md"
+  - ".github"
+  - ".vscode"
+  - "build/OpenTelemetry.proj"
+  - "docs"
+  - "examples"
+  - "src/Shared"
+  - "test"
+
+flags:
+  unittests-Solution:
+    carryforward: true
+    paths:
+      - src
+
+  unittests-Project-Stable:
+    carryforward: true
+    paths:
+      - src
+
+  unittests-Project-Experimental:
+    carryforward: true
+    paths:
+      - src
+
+  unittests-UnstableCoreLibraries-Experimental:
+    carryforward: true
+    paths:
+      - src
+
+  unittests-PowerShellScripts:
+    carryforward: true
+    paths:
+      - build/scripts

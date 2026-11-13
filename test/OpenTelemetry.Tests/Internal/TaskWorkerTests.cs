@@ -1,0 +1,175 @@
+// Copyright The OpenTelemetry Authors
+// SPDX-License-Identifier: Apache-2.0
+
+using System.Diagnostics;
+using OpenTelemetry.Metrics;
+
+namespace OpenTelemetry.Internal.Tests;
+
+public class TaskWorkerTests
+{
+    private const int BaselineCollectCount = 2;
+    private const int CircularBufferCapacity = 8;
+    private const int IdleCyclesBeforeTrigger = 2;
+    private const int MaxExportBatchSize = 4;
+    private const int PostBaselinePauseMilliseconds = 20;
+    private const int WaitUntilPollingIntervalMilliseconds = 10;
+    private const int WorkerDelayMilliseconds = 2_000;
+    private const int WorkerTimeoutMilliseconds = 1_000;
+    private const int ShutdownTimeoutMilliseconds = 10_000;
+    private const int BaselineWaitTimeoutMilliseconds = 10_000;
+
+    // A triggered export must complete well before the next scheduled one would run
+    // (WorkerDelayMilliseconds), but with enough headroom for the worker to be scheduled
+    // when the machine is busy running the rest of the test suite in parallel.
+    private const int TriggerCompletionTimeoutMilliseconds = WorkerDelayMilliseconds / 2;
+
+    [Fact]
+    public async Task BatchExportTaskWorker_TriggerExportAfterIdleCycles_DoesNotWaitForScheduledDelay()
+    {
+        EnsureThreadPoolWorkerThreadsAvailable();
+
+        // Arrange
+        var circularBuffer = new CircularBuffer<Activity>(capacity: CircularBufferCapacity);
+        using var exporter = new TestActivityExporter();
+        using var worker = new BatchExportTaskWorker<Activity>(
+            circularBuffer,
+            exporter,
+            maxExportBatchSize: MaxExportBatchSize,
+            scheduledDelayMilliseconds: WorkerDelayMilliseconds,
+            exporterTimeoutMilliseconds: WorkerTimeoutMilliseconds);
+
+        worker.Start();
+
+        await Task.Delay(GetIdleWaitDuration(), TestContext.Current.CancellationToken);
+
+        using var activity = new Activity("test");
+
+        Assert.True(circularBuffer.Add(activity));
+        Assert.True(worker.TriggerExport());
+
+        // Act
+        await WaitUntilAsync(() => exporter.ExportCount >= 1, TriggerCompletionTimeoutMilliseconds);
+
+        // Assert
+        Assert.True(worker.Shutdown(ShutdownTimeoutMilliseconds));
+    }
+
+    [Fact]
+    public async Task PeriodicExportingMetricReaderTaskWorker_TriggerExportAfterIdleCycles_DoesNotWaitForExportInterval()
+    {
+        EnsureThreadPoolWorkerThreadsAvailable();
+
+        // Arrange
+        using var reader = new TestMetricReader();
+        using var worker = new PeriodicExportingMetricReaderTaskWorker(
+            reader,
+            exportIntervalMilliseconds: WorkerDelayMilliseconds,
+            exportTimeoutMilliseconds: WorkerTimeoutMilliseconds);
+
+        worker.Start();
+
+        await WaitUntilAsync(() => reader.CollectCount >= BaselineCollectCount, BaselineWaitTimeoutMilliseconds);
+
+        var baselineCollectCount = reader.CollectCount;
+
+        await Task.Delay(PostBaselinePauseMilliseconds, TestContext.Current.CancellationToken);
+
+        Assert.True(worker.TriggerExport());
+
+        // Act
+        await WaitUntilAsync(() => reader.CollectCount >= baselineCollectCount + 1, TriggerCompletionTimeoutMilliseconds);
+
+        // Assert
+        Assert.True(worker.Shutdown(ShutdownTimeoutMilliseconds));
+    }
+
+    [Fact]
+    public void PeriodicExportingMetricReaderTaskWorker_ShutdownBeforeStart_MakesFinalCollection()
+    {
+        EnsureThreadPoolWorkerThreadsAvailable();
+
+        // Arrange
+        using var reader = new TestMetricReader();
+        using var worker = new PeriodicExportingMetricReaderTaskWorker(
+            reader,
+            exportIntervalMilliseconds: WorkerDelayMilliseconds,
+            exportTimeoutMilliseconds: WorkerTimeoutMilliseconds);
+
+        // Shutdown is requested before the worker task has started running,
+        // as when it is requested before the worker is first scheduled.
+        Assert.True(worker.Shutdown(ShutdownTimeoutMilliseconds));
+
+        // Act
+        worker.Start();
+
+        // Assert
+        Assert.True(worker.Shutdown(ShutdownTimeoutMilliseconds));
+        Assert.Equal(1, reader.CollectCount);
+    }
+
+    private static async Task WaitUntilAsync(Func<bool> condition, int timeoutMilliseconds)
+    {
+        var sw = Stopwatch.StartNew();
+
+        while (sw.ElapsedMilliseconds < timeoutMilliseconds)
+        {
+            if (condition())
+            {
+                return;
+            }
+
+            await Task.Delay(WaitUntilPollingIntervalMilliseconds);
+        }
+
+        Assert.True(condition(), $"Condition was not met within the timeout period of {timeoutMilliseconds} milliseconds.");
+    }
+
+    private static int GetIdleWaitDuration()
+        => (IdleCyclesBeforeTrigger * WorkerDelayMilliseconds) + (WorkerDelayMilliseconds / 5);
+
+    private static void EnsureThreadPoolWorkerThreadsAvailable()
+    {
+        ThreadPool.GetMinThreads(out var workerThreads, out var completionPortThreads);
+
+        var desiredWorkerThreads = Math.Max(workerThreads, Environment.ProcessorCount * 2);
+
+        if (desiredWorkerThreads > workerThreads)
+        {
+            ThreadPool.SetMinThreads(desiredWorkerThreads, completionPortThreads);
+        }
+    }
+
+    private sealed class TestActivityExporter : BaseExporter<Activity>
+    {
+        private int exportCount;
+
+        public int ExportCount => this.exportCount;
+
+        public override ExportResult Export(in Batch<Activity> batch)
+        {
+            Interlocked.Increment(ref this.exportCount);
+            return ExportResult.Success;
+        }
+    }
+
+#pragma warning disable CA2000 // BaseExportingMetricReader owns the exporter lifecycle
+    private sealed class TestMetricReader() : BaseExportingMetricReader(new TestMetricExporter())
+#pragma warning restore CA2000
+    {
+        private int collectCount;
+
+        public int CollectCount => this.collectCount;
+
+        protected override bool OnCollect(int timeoutMilliseconds)
+        {
+            Interlocked.Increment(ref this.collectCount);
+            return true;
+        }
+    }
+
+    private sealed class TestMetricExporter : BaseExporter<Metric>
+    {
+        public override ExportResult Export(in Batch<Metric> batch) => ExportResult.Success;
+    }
+}

@@ -1,197 +1,95 @@
-// <copyright file="ZipkinActivityExporterRemoteEndpointTests.cs" company="OpenTelemetry Authors">
 // Copyright The OpenTelemetry Authors
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//     http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
-// </copyright>
+// SPDX-License-Identifier: Apache-2.0
 
-using System.Collections.Generic;
 using OpenTelemetry.Exporter.Zipkin.Tests;
 using OpenTelemetry.Trace;
-using Xunit;
 
-namespace OpenTelemetry.Exporter.Zipkin.Implementation.Tests
+namespace OpenTelemetry.Exporter.Zipkin.Implementation.Tests;
+
+public class ZipkinActivityExporterRemoteEndpointTests
 {
-    public class ZipkinActivityExporterRemoteEndpointTests
+    private static readonly ZipkinEndpoint DefaultZipkinEndpoint = new("TestService");
+
+    [Theory]
+    [MemberData(nameof(RemoteEndpointPriorityTestCase.TestCases), MemberType = typeof(RemoteEndpointPriorityTestCase))]
+    public void GenerateActivity_RemoteEndpointResolutionPriority(string testCaseName)
     {
-        private static readonly ZipkinEndpoint DefaultZipkinEndpoint = new("TestService");
+        var testCase = RemoteEndpointPriorityTestCase.GetTestCase(testCaseName);
 
-        [Fact]
-        public void GenerateActivity_RemoteEndpointOmittedByDefault()
+        // Arrange
+        using var activity =
+            ZipkinActivitySource.CreateTestActivity(additionalAttributes: testCase.RemoteEndpointAttributes!);
+
+        // Act & Assert
+        var zipkinSpan = ZipkinActivityConversionExtensions.ToZipkinSpan(activity, DefaultZipkinEndpoint);
+
+        Assert.NotNull(zipkinSpan.RemoteEndpoint);
+        Assert.Equal(testCase.ExpectedResult, zipkinSpan.RemoteEndpoint.ServiceName);
+    }
+
+    [Fact]
+    public void GenerateActivity_RemoteEndpointCacheIsBounded()
+    {
+        ZipkinActivityConversionExtensions.ClearRemoteEndpointCache();
+
+        for (var i = 0; i < ZipkinActivityConversionExtensions.MaxRemoteEndpointCacheSize + 200; i++)
         {
-            // Arrange
-            var activity = ZipkinExporterTests.CreateTestActivity();
-
-            // Act & Assert
-            var zipkinSpan = ZipkinActivityConversionExtensions.ToZipkinSpan(activity, DefaultZipkinEndpoint);
-
-            Assert.NotNull(zipkinSpan.RemoteEndpoint);
-        }
-
-        [Fact]
-        public void GenerateActivity_RemoteEndpointResolution()
-        {
-            // Arrange
-            var activity = ZipkinExporterTests.CreateTestActivity(
+            using var activity = ZipkinActivitySource.CreateTestActivity(
                 additionalAttributes: new Dictionary<string, object>
                 {
-                    ["net.peer.name"] = "RemoteServiceName",
+                    [SemanticConventions.AttributePeerService] = $"service-{i}",
                 });
 
-            // Act & Assert
-            var zipkinSpan = ZipkinActivityConversionExtensions.ToZipkinSpan(activity, DefaultZipkinEndpoint);
-
-            Assert.NotNull(zipkinSpan.RemoteEndpoint);
-            Assert.Equal("RemoteServiceName", zipkinSpan.RemoteEndpoint.ServiceName);
+            var zipkinSpan = activity.ToZipkinSpan(DefaultZipkinEndpoint);
+            Assert.Equal($"service-{i}", zipkinSpan.RemoteEndpoint?.ServiceName);
         }
 
-        [Theory]
-        [MemberData(nameof(RemoteEndpointPriorityTestCase.GetTestCases), MemberType = typeof(RemoteEndpointPriorityTestCase))]
-        public void GenerateActivity_RemoteEndpointResolutionPriority(RemoteEndpointPriorityTestCase testCase)
+        Assert.Equal(
+            ZipkinActivityConversionExtensions.MaxRemoteEndpointCacheSize,
+            ZipkinActivityConversionExtensions.GetRemoteEndpointCacheCount());
+    }
+
+    [Fact]
+    public void GenerateActivity_RemoteEndpointCacheEvictsLeastRecentlyUsedEntry()
+    {
+        ZipkinActivityConversionExtensions.ClearRemoteEndpointCache();
+
+        ZipkinEndpoint? firstEndpoint = null;
+
+        for (var i = 0; i < ZipkinActivityConversionExtensions.MaxRemoteEndpointCacheSize; i++)
         {
-            // Arrange
-            var activity = ZipkinExporterTests.CreateTestActivity(additionalAttributes: testCase.RemoteEndpointAttributes);
+            using var activity = ZipkinActivitySource.CreateTestActivity(
+                additionalAttributes: new Dictionary<string, object>
+                {
+                    [SemanticConventions.AttributePeerService] = $"service-{i}",
+                });
 
-            // Act & Assert
-            var zipkinSpan = ZipkinActivityConversionExtensions.ToZipkinSpan(activity, DefaultZipkinEndpoint);
-
-            Assert.NotNull(zipkinSpan.RemoteEndpoint);
-            Assert.Equal(testCase.ExpectedResult, zipkinSpan.RemoteEndpoint.ServiceName);
-        }
-
-        public class RemoteEndpointPriorityTestCase
-        {
-            public string Name { get; set; }
-
-            public string ExpectedResult { get; set; }
-
-            public Dictionary<string, object> RemoteEndpointAttributes { get; set; }
-
-            public static IEnumerable<object[]> GetTestCases()
+            var zipkinSpan = activity.ToZipkinSpan(DefaultZipkinEndpoint);
+            if (i == 0)
             {
-                yield return new object[]
-                {
-                    new RemoteEndpointPriorityTestCase
-                    {
-                        Name = "Highest priority name = net.peer.name",
-                        ExpectedResult = "RemoteServiceName",
-                        RemoteEndpointAttributes = new Dictionary<string, object>
-                        {
-                            ["http.host"] = "DiscardedRemoteServiceName",
-                            ["net.peer.name"] = "RemoteServiceName",
-                            ["peer.hostname"] = "DiscardedRemoteServiceName",
-                        },
-                    },
-                };
-
-                yield return new object[]
-                {
-                    new RemoteEndpointPriorityTestCase
-                    {
-                        Name = "Highest priority name = SemanticConventions.AttributePeerService",
-                        ExpectedResult = "RemoteServiceName",
-                        RemoteEndpointAttributes = new Dictionary<string, object>
-                        {
-                            [SemanticConventions.AttributePeerService] = "RemoteServiceName",
-                            ["http.host"] = "DiscardedRemoteServiceName",
-                            ["net.peer.name"] = "DiscardedRemoteServiceName",
-                            ["net.peer.port"] = "1234",
-                            ["peer.hostname"] = "DiscardedRemoteServiceName",
-                        },
-                    },
-                };
-
-                yield return new object[]
-                {
-                    new RemoteEndpointPriorityTestCase
-                    {
-                        Name = "Only has net.peer.name and net.peer.port",
-                        ExpectedResult = "RemoteServiceName:1234",
-                        RemoteEndpointAttributes = new Dictionary<string, object>
-                        {
-                            ["net.peer.name"] = "RemoteServiceName",
-                            ["net.peer.port"] = "1234",
-                        },
-                    },
-                };
-
-                yield return new object[]
-                {
-                    new RemoteEndpointPriorityTestCase
-                    {
-                        Name = "net.peer.port is an int",
-                        ExpectedResult = "RemoteServiceName:1234",
-                        RemoteEndpointAttributes = new Dictionary<string, object>
-                        {
-                            ["net.peer.name"] = "RemoteServiceName",
-                            ["net.peer.port"] = 1234,
-                        },
-                    },
-                };
-
-                yield return new object[]
-                {
-                    new RemoteEndpointPriorityTestCase
-                    {
-                        Name = "Has net.peer.name and net.peer.port",
-                        ExpectedResult = "RemoteServiceName:1234",
-                        RemoteEndpointAttributes = new Dictionary<string, object>
-                        {
-                            ["http.host"] = "DiscardedRemoteServiceName",
-                            ["net.peer.name"] = "RemoteServiceName",
-                            ["net.peer.port"] = "1234",
-                            ["peer.hostname"] = "DiscardedRemoteServiceName",
-                        },
-                    },
-                };
-
-                yield return new object[]
-                {
-                    new RemoteEndpointPriorityTestCase
-                    {
-                        Name = "Has net.peer.ip and net.peer.port",
-                        ExpectedResult = "1.2.3.4:1234",
-                        RemoteEndpointAttributes = new Dictionary<string, object>
-                        {
-                            ["http.host"] = "DiscardedRemoteServiceName",
-                            ["net.peer.ip"] = "1.2.3.4",
-                            ["net.peer.port"] = "1234",
-                            ["peer.hostname"] = "DiscardedRemoteServiceName",
-                        },
-                    },
-                };
-
-                yield return new object[]
-                {
-                    new RemoteEndpointPriorityTestCase
-                    {
-                        Name = "Has net.peer.name, net.peer.ip, and net.peer.port",
-                        ExpectedResult = "RemoteServiceName:1234",
-                        RemoteEndpointAttributes = new Dictionary<string, object>
-                        {
-                            ["http.host"] = "DiscardedRemoteServiceName",
-                            ["net.peer.name"] = "RemoteServiceName",
-                            ["net.peer.ip"] = "1.2.3.4",
-                            ["net.peer.port"] = "1234",
-                            ["peer.hostname"] = "DiscardedRemoteServiceName",
-                        },
-                    },
-                };
-            }
-
-            public override string ToString()
-            {
-                return this.Name;
+                firstEndpoint = zipkinSpan.RemoteEndpoint;
             }
         }
+
+        using var overflowActivity = ZipkinActivitySource.CreateTestActivity(
+            additionalAttributes: new Dictionary<string, object>
+            {
+                [SemanticConventions.AttributePeerService] = "service-overflow",
+            });
+        _ = overflowActivity.ToZipkinSpan(DefaultZipkinEndpoint);
+
+        using var evictedEntryActivity = ZipkinActivitySource.CreateTestActivity(
+            additionalAttributes: new Dictionary<string, object>
+            {
+                [SemanticConventions.AttributePeerService] = "service-0",
+            });
+        var evictedEntrySpan = evictedEntryActivity.ToZipkinSpan(DefaultZipkinEndpoint);
+
+        Assert.NotNull(firstEndpoint);
+        Assert.NotNull(evictedEntrySpan.RemoteEndpoint);
+        Assert.NotSame(firstEndpoint, evictedEntrySpan.RemoteEndpoint);
+        Assert.Equal(
+            ZipkinActivityConversionExtensions.MaxRemoteEndpointCacheSize,
+            ZipkinActivityConversionExtensions.GetRemoteEndpointCacheCount());
     }
 }

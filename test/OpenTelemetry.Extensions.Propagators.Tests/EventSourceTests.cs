@@ -1,0 +1,19 @@
+// Copyright The OpenTelemetry Authors
+// SPDX-License-Identifier: Apache-2.0
+
+using OpenTelemetry.Internal;
+using OpenTelemetry.Tests;
+
+namespace OpenTelemetry.Extensions.Propagators.Tests;
+
+[Collection(EventSourceCollectionDefinition.Name)]
+public class EventSourceTests
+{
+    [Fact]
+    public void EventSourceTests_OpenTelemetryPropagatorsEventSource() =>
+        EventSourceTestHelper.ValidateEventSourceIds<OpenTelemetryPropagatorsEventSource>();
+
+    [Fact]
+    public void EventSourceTests_OpenTelemetryPropagatorsEventSource_WritesEvents() =>
+        EventSourceTestHelper.ExerciseEventSource<OpenTelemetryPropagatorsEventSource>();
+}

@@ -1,6 +1,1239 @@
 # Changelog
 
+This file contains individual changes for the
+OpenTelemetry.Exporter.OpenTelemetryProtocol package. For highlights and
+announcements covering all components see: [Release
+Notes](../../RELEASENOTES.md).
+
 ## Unreleased
+
+## 1.21.0
+
+Released 2026-Nov-11
+
+* Hardened the experimental disk retry feature.
+  * **Breaking:** When running on .NET on non-Windows platforms, creating the
+    exporter now throws an `UnauthorizedAccessException` if the retry
+    directory could be changed by another user. The retry directory must be
+    owned by the current user and must not be writable by its group or by
+    other users. Each directory and symbolic link in its path must be owned by
+    the current user or by root, and those directories must not be writable
+    by their group or by other users unless they have the sticky bit set (such
+    as `/tmp`). These checks can be disabled by setting the new
+    `OTEL_DOTNET_EXPERIMENTAL_OTLP_DISK_RETRY_CHECK_PERMISSIONS` setting to
+    `false`.
+  ([#7964](https://github.com/open-telemetry/opentelemetry-dotnet/pull/7964))
+
+## 1.21.0-rc.2
+
+Released 2026-Nov-09
+
+* Fixed unbounded resource serialization buffer growth and incorrect buffer
+  reuse after buffer allocation failures.
+  ([#8069](https://github.com/open-telemetry/opentelemetry-dotnet/pull/8069))
+
+* Fixed exporter option initialization failing when environment variable access
+  is denied.
+  ([#8070](https://github.com/open-telemetry/opentelemetry-dotnet/pull/8070))
+
+* Fixed `OTEL_EXPORTER_OTLP_HEADERS` (and the `Headers` option) being decoded
+  before it was split into headers, so that a percent-encoded `,` in a value
+  started a new header and encoded leading or trailing whitespace was removed.
+  ([#8075](https://github.com/open-telemetry/opentelemetry-dotnet/pull/8075))
+
+* Fixed the retry delay of a gRPC response being ignored or misread when a
+  length which does not fit in an `int` was truncated instead of being
+  rejected.
+  ([#8075](https://github.com/open-telemetry/opentelemetry-dotnet/pull/8075))
+
+* Fixed the retry delay of a gRPC response being ignored or misread when a
+  field did not have the wire type that its number defines, instead of the
+  field being skipped.
+  ([#8075](https://github.com/open-telemetry/opentelemetry-dotnet/pull/8075))
+
+* Fixed the retry delay of a gRPC response being misread when the `retry_delay`
+  field was repeated, instead of the occurrences being merged.
+  ([#8075](https://github.com/open-telemetry/opentelemetry-dotnet/pull/8075))
+
+* Fixed the retry delay of a gRPC response being ignored when the
+  `grpc-status-details-bin` trailer was Base64-encoded without padding, as
+  emitted by gRPC-Go.
+  ([#8075](https://github.com/open-telemetry/opentelemetry-dotnet/pull/8075))
+
+* The retry delay in the `grpc-status-details-bin` trailer of a gRPC response is
+  now ignored if the status code in the details contradicts the `grpc-status`
+  of the response.
+  ([#8078](https://github.com/open-telemetry/opentelemetry-dotnet/pull/8078))
+
+* Attribute values implementing `IUtf8SpanFormattable` (.NET 10+) that are not
+  already handled as a built-in type are now formatted directly into the export
+  buffer with `TryFormat` and exported as string attributes, instead of through
+  `ToString()`.
+  ([#7929](https://github.com/open-telemetry/opentelemetry-dotnet/pull/7929))
+
+* An `OutOfMemoryException` thrown while converting an attribute value to a
+  string is no longer swallowed and the attribute dropped; it now propagates.
+  ([#7929](https://github.com/open-telemetry/opentelemetry-dotnet/pull/7929))
+
+* Fixed string attribute values truncated by an attribute value length limit
+  ending in half of a surrogate pair. The truncated value now ends before the
+  pair instead.
+  ([#7929](https://github.com/open-telemetry/opentelemetry-dotnet/pull/7929))
+
+* Added support for batching the metric points exported by the periodic
+  exporting metric reader. Set
+  `PeriodicExportingMetricReaderOptions.MaxExportBatchSize` to limit the
+  number of metric points in each exported batch. It can also be configured
+  with the `OTEL_METRIC_EXPORT_MAX_BATCH_SIZE` environment variable.
+  ([#8053](https://github.com/open-telemetry/opentelemetry-dotnet/pull/8053))
+
+## 1.21.0-rc.1
+
+Released 2026-Oct-28
+
+* Fixed experimental in-memory retries exceeding the export timeout when a
+  retried request stalls.
+  ([#7977](https://github.com/open-telemetry/opentelemetry-dotnet/pull/7977))
+
+* **Breaking:** The span status description (`Activity.StatusDescription` or
+  the `otel.status_description` tag) is now truncated to the configured span
+  attribute value length limit (for example
+  `OTEL_SPAN_ATTRIBUTE_VALUE_LENGTH_LIMIT`) instead of being exported in full.
+  ([#7995](https://github.com/open-telemetry/opentelemetry-dotnet/pull/7995))
+
+* Redacted nonstandard OTLP endpoint paths in internal diagnostic logs with
+  `[REDACTED]`, while retaining standard HTTP and gRPC service paths.
+  ([#8016](https://github.com/open-telemetry/opentelemetry-dotnet/pull/8016))
+
+* Fixed exports continuing until `OtlpExporterOptions.TimeoutMilliseconds`
+  elapsed when a shorter timeout applied to them, such as the timeout passed
+  to `MeterProvider.ForceFlush()`,
+  `PeriodicExportingMetricReaderOptions.ExportTimeoutMilliseconds`
+  (`OTEL_METRIC_EXPORT_TIMEOUT`) or
+  `BatchExportProcessorOptions<T>.ExporterTimeoutMilliseconds`
+  (`OTEL_BSP_EXPORT_TIMEOUT`, `OTEL_BLRP_EXPORT_TIMEOUT`). The request is now
+  canceled when the shorter of the timeouts elapses. The time taken to
+  serialize the telemetry now counts towards the timeout, and no request is
+  sent once it has elapsed.
+  ([#7996](https://github.com/open-telemetry/opentelemetry-dotnet/pull/7996))
+
+* Fixed arrays of string-valued key/value pairs being
+  exported as arrays of strings instead of maps.
+  ([#7694](https://github.com/open-telemetry/opentelemetry-dotnet/pull/7694))
+
+* **Breaking Change** Dropped support for `net8.0` and `net9.0`.
+  ([#6899](https://github.com/open-telemetry/opentelemetry-dotnet/pull/6899))
+
+* Add support for .NET 11.0.
+  ([#6899](https://github.com/open-telemetry/opentelemetry-dotnet/pull/6899))
+
+## 1.20.1
+
+Released 2026-Oct-20
+
+## 1.20.1-rc.1
+
+Released 2026-Oct-20
+
+* Fixed informational HTTP client logs not being suppressed by default when the
+  OTLP log exporter is registered using `OpenTelemetryLoggerOptions.AddOtlpExporter`.
+  ([#7959](https://github.com/open-telemetry/opentelemetry-dotnet/pull/7959))
+
+* **Breaking:** `HttpClient` instances created by the exporter directly no
+  longer follow HTTP redirects. A `3xx` response is now treated as a failed
+  export. See [Configure HttpClient](README.md#configure-httpclient)
+  to prevent `HttpClient` created by `IHttpClientFactory` from following
+  redirects.
+  ([#7958](https://github.com/open-telemetry/opentelemetry-dotnet/pull/7958))
+
+* The value of `OTEL_EXPORTER_OTLP_ENDPOINT`, or of its signal-specific
+  variants, is no longer written to the exporter's diagnostic log when it is
+  not a valid URI.
+  ([#7971](https://github.com/open-telemetry/opentelemetry-dotnet/pull/7971))
+
+* Hardened the experimental disk retry feature.
+  * When running on .NET on non-Windows platforms, the retry directory and
+    the blob files within it are now created accessible to the current user
+    only, including when the directory is recreated after being deleted.
+  * Directory size accounting no longer follows subdirectories, avoiding
+    a symbolic-link/junction walk.
+  * Expired lease-file cleanup now correctly locates the lease timestamp
+    delimiter within the file name rather than the whole path.
+  * Storage maintenance no longer deletes or renames files with a `.blob`,
+    `.tmp` or `.lock` extension that the exporter did not create when the
+    retry directory is shared with other files. Only files named the way the
+    exporter names its blobs, and the temporary and lease files derived from
+    them, are now removed or renamed, and only blobs named that way are now
+    retried.
+  * Timestamps in blob and lease file names are now always written using the
+    Gregorian calendar. Previously, when the current culture used a different
+    calendar, files were given timestamps that caused them never to be
+    removed or released when the storage was maintained.
+  * A stored request whose lease has expired is no longer deleted after it has
+    been retried, as it may have since been leased again for another retry.
+  * Stored blobs that are empty or that are larger than the maximum size of
+    the storage are no longer read. When running on .NET, stored blobs that
+    are symbolic links are also no longer read.
+  ([#7857](https://github.com/open-telemetry/opentelemetry-dotnet/pull/7857))
+
+* Only the first 4 KiB of the body of an unsuccessful response is now read and
+  written to the exporter's diagnostic log, instead of up to
+  `MaxResponseSizeBytes`.
+  ([#7969](https://github.com/open-telemetry/opentelemetry-dotnet/pull/7969))
+
+* Fixed reading the body of a failed export response for the exporter's
+  diagnostic log not being bounded by the export timeout.
+  ([#7970](https://github.com/open-telemetry/opentelemetry-dotnet/pull/7970))
+
+* Fixed the body of a failed export response never being written to the
+  exporter's diagnostic log when running on .NET Framework.
+  ([#7970](https://github.com/open-telemetry/opentelemetry-dotnet/pull/7970))
+
+* Fixed attributes whose value is converted with `ToString()` (for example
+  enums, `Uri` or `StringValues`) being dropped as unsupported, and for metric
+  data points omitted from every later export, when the export buffer had to
+  be resized while the attribute was being written.
+  ([#7973](https://github.com/open-telemetry/opentelemetry-dotnet/pull/7973))
+
+* **Breaking:** Fixed telemetry stored by the experimental disk retry feature
+  for one exporter being resent by another exporter for the same signal to its
+  own endpoint and with its own headers. Disk retry storage is now additionally
+  separated by a subdirectory derived from the exporter's `Protocol`,
+  `Endpoint` and `Headers`. Telemetry stored on disk by earlier versions is
+  not resent.
+  ([#7972](https://github.com/open-telemetry/opentelemetry-dotnet/pull/7972))
+
+* Exponential histogram bucket counts are now serialized in the packed
+  encoding, which reduces the size of the exported payload.
+  ([#7897](https://github.com/open-telemetry/opentelemetry-dotnet/pull/7897))
+
+* Fixed inline certificate or private key material being included in OTLP
+  diagnostic events and exceptions when supplied instead of a file path.
+  ([#7981](https://github.com/open-telemetry/opentelemetry-dotnet/pull/7981))
+
+* Fixed early metric collections permanently omitting resource attributes from
+  subsequent exports while the `MeterProvider` is being built.
+  ([#7984](https://github.com/open-telemetry/opentelemetry-dotnet/pull/7984))
+
+## 1.20.0
+
+Released 2026-Oct-15
+
+## 1.20.0-rc.1
+
+Released 2026-Oct-15
+
+* Avoid closure allocations when serializing cached metric metadata.
+  ([#7841](https://github.com/open-telemetry/opentelemetry-dotnet/pull/7841))
+
+* Custom TLS certificate options (custom CA trust and mTLS) and the experimental
+  disk retry feature are explicitly marked as not supported on browser-based
+  platforms (e.g. Blazor).
+  ([#7799](https://github.com/open-telemetry/opentelemetry-dotnet/pull/7799))
+
+* Suppressed informational HTTP client logs from OTLP exporters by default. See
+  [HttpClient logging](README.md#httpclient-logging) for configuration overrides.
+  ([#7743](https://github.com/open-telemetry/opentelemetry-dotnet/pull/7743))
+
+* Avoid logging malformed HTTP request headers in the exporter's diagnostic log.
+  ([#7858](https://github.com/open-telemetry/opentelemetry-dotnet/pull/7858))
+
+* Avoid buffering the whole compressed request body in memory before sending it
+  on .NET Framework when using HTTP/protobuf with gzip compression.
+  ([#7879](https://github.com/open-telemetry/opentelemetry-dotnet/pull/7879))
+
+* The OTLP log exporter now exports `schema_url` on `ScopeLogs`. Log
+  records emitted from a `Logger` with a schema URL set now populate
+  `ScopeLogs.schema_url` in exported OTLP requests.
+  ([#7727](https://github.com/open-telemetry/opentelemetry-dotnet/pull/7727))
+
+* **Breaking:** `byte[]` attributes longer than the configured attribute value
+  length limit (for example `OTEL_ATTRIBUTE_VALUE_LENGTH_LIMIT`) are now
+  truncated to that many bytes instead of being exported in full.
+  ([#7893](https://github.com/open-telemetry/opentelemetry-dotnet/pull/7893))
+
+* **Breaking:** `OTEL_EVENT_ATTRIBUTE_COUNT_LIMIT` and
+  `OTEL_LINK_ATTRIBUTE_COUNT_LIMIT` now fall back to
+  `OTEL_ATTRIBUTE_COUNT_LIMIT` (then the default of 128) when not set, instead
+  of falling back to `OTEL_SPAN_ATTRIBUTE_COUNT_LIMIT`.
+  ([#7894](https://github.com/open-telemetry/opentelemetry-dotnet/pull/7894))
+
+* **Breaking:** Instrumentation scope attributes exported from
+  `ActivitySource.Tags` are now limited by `OTEL_ATTRIBUTE_COUNT_LIMIT` instead
+  of `OTEL_SPAN_ATTRIBUTE_COUNT_LIMIT`. Only applications that set
+  `OTEL_SPAN_ATTRIBUTE_COUNT_LIMIT` to a different value from
+  `OTEL_ATTRIBUTE_COUNT_LIMIT` are affected.
+  ([#7902](https://github.com/open-telemetry/opentelemetry-dotnet/pull/7902))
+
+* Fixed log records being dropped when using `OtlpExportProtocol.HttpProtobuf`
+  with `IHttpClientFactory` integration if the first export of logs happens
+  while the `IServiceProvider` is being disposed. The exporter now falls back
+  to the default `HttpClient` instead of failing the export.
+  ([#7916](https://github.com/open-telemetry/opentelemetry-dotnet/pull/7916))
+
+## 1.19.1
+
+Released 2026-Sep-21
+
+## 1.19.1-rc.1
+
+Released 2026-Sep-21
+
+## 1.19.0
+
+Released 2026-Sep-18
+
+## 1.19.0-rc.1
+
+Released 2026-Sep-18
+
+* If an exception is thrown when serializing an attribute, the attribute will
+  now be dropped.
+  ([#7688](https://github.com/open-telemetry/opentelemetry-dotnet/pull/7688))
+
+* Extended key/value list attribute serialization to cover additional
+  dictionary shapes (`IEnumerable<KeyValuePair<string, string?>>` and
+  `IDictionary`). These attributes will be serialized as nested OTLP
+  `kvlist` values.
+  ([#7679](https://github.com/open-telemetry/opentelemetry-dotnet/pull/7679))
+
+* Disable HttpClientFactory integration on browser WebAssembly (e.g. Blazor)
+  environments to avoid stalled export requests when async HTTP handlers are used.
+  ([#7709](https://github.com/open-telemetry/opentelemetry-dotnet/pull/7709))
+
+* Fixed CA certificate loading (e.g. using `OTEL_EXPORTER_OTLP_CERTIFICATE`)
+  for PEM-encoded certificates that only contain a public key.
+  ([#7693](https://github.com/open-telemetry/opentelemetry-dotnet/pull/7693))
+
+* Prevented oversized metric metadata from being cached when it cannot fit
+  within the configured request size.
+  ([#7752](https://github.com/open-telemetry/opentelemetry-dotnet/pull/7752))
+
+## 1.18.0
+
+Released 2026-Aug-21
+
+## 1.18.0-rc.1
+
+Released 2026-Aug-21
+
+* Fixed `UseOtlpExporter` to respect options configured through
+  `services.Configure<OtlpExporterOptions>(...)`.
+  ([#7540](https://github.com/open-telemetry/opentelemetry-dotnet/pull/7540))
+
+* Clamped the server-supplied OTLP/gRPC retry delay (`RetryInfo.retry_delay`) to
+  a non-negative value. A negative delay previously caused the telemetry batch
+  to be dropped.
+  ([#7544](https://github.com/open-telemetry/opentelemetry-dotnet/pull/7544))
+
+* Fixed serialization failures leaving failed trace, metric, and log batches in
+  the serializer's per-thread state. For logs, this also leaked pooled instances.
+  ([#7579](https://github.com/open-telemetry/opentelemetry-dotnet/pull/7579))
+
+* Fixed the persistent-storage retry thread terminating permanently on an
+  unexpected exception, which silently disabled `disk` retry for the remaining
+  process lifetime while stored telemetry continued to accumulate and then
+  expire.
+  ([#7597](https://github.com/open-telemetry/opentelemetry-dotnet/pull/7597))
+
+* Fixed the OTLP exporter from retrying certain non-transient HTTP failures.
+  ([#7600](https://github.com/open-telemetry/opentelemetry-dotnet/pull/7600))
+
+* Added support for serializing attribute values that are key/value lists
+  (`IEnumerable<KeyValuePair<string, object?>>`) as nested OTLP `kvlist` values.
+  Nesting is limited to a maximum recursion depth of 3; deeper values fall back
+  to their string representation.
+  ([#7015](https://github.com/open-telemetry/opentelemetry-dotnet/pull/7015))
+
+* A server-supplied throttle delay (OTLP/gRPC `RetryInfo.retry_delay` or
+  OTLP/HTTP `Retry-After`) is now clamped to a minimum of 100 milliseconds.
+  ([#7583](https://github.com/open-telemetry/opentelemetry-dotnet/pull/7583))
+
+* Added `OtlpExporterOptions.MaxResponseSizeBytes` to configure the maximum size
+  of a response the exporter will accept, as required by the OpenTelemetry
+  specification. The default is the recommended 4 MiB. A response exceeding the
+  limit is discarded and treated as a non-retryable failure.
+  ([#7583](https://github.com/open-telemetry/opentelemetry-dotnet/pull/7583))
+
+* Improved OTLP log attribute serialization performance by avoiding unnecessary
+  boxing.
+  ([#7645](https://github.com/open-telemetry/opentelemetry-dotnet/pull/7645))
+
+* Improved OTLP histogram serialization performance by avoiding a redundant
+  scan of explicit bucket bounds.
+  ([#7647](https://github.com/open-telemetry/opentelemetry-dotnet/pull/7647))
+
+* The OTLP exporter will now export logger version if it was specified. Log
+  records are grouped into `ScopeLogs` by logger name and version, so loggers
+  sharing a name but reporting different versions are exported as separate
+  scopes.
+  ([#7636](https://github.com/open-telemetry/opentelemetry-dotnet/pull/7636))
+
+* Fixed persistent storage allowing a blob write to exceed the configured
+  maximum storage size.
+  ([#7646](https://github.com/open-telemetry/opentelemetry-dotnet/pull/7646))
+
+* Improved OTLP/gRPC response status handling performance by avoiding unnecessary
+  header enumeration on .NET 8+.
+  ([#7659](https://github.com/open-telemetry/opentelemetry-dotnet/pull/7659))
+
+* Added `OtlpExporterOptions.MaxRequestSizeBytes` to configure the OTLP request
+  size limit, as required by the OpenTelemetry specification. The default is the
+  recommended 64 MiB. A batch whose serialized payload exceeds the limit is not
+  sent and is dropped in its entirety. The maximum supported value is 256 MiB.
+  ([#7584](https://github.com/open-telemetry/opentelemetry-dotnet/pull/7584))
+
+* **Breaking:** The maximum size of a single export request is now 64 MiB by
+  default instead of 128 MiB to conform with the OpenTelemetry specification.
+  Raise the value of `OtlpExporterOptions.MaxRequestSizeBytes` property to
+  increase the capacity.
+  ([#7584](https://github.com/open-telemetry/opentelemetry-dotnet/pull/7584))
+
+## 1.17.0
+
+Released 2026-Jul-16
+
+## 1.17.0-rc.1
+
+Released 2026-Jul-16
+
+* Fixed `OtlpLogExporter` so `OtlpExporterOptions.ExportProcessorType` and
+  `OtlpExporterOptions.BatchExportProcessorOptions` are respected when
+  `LogRecordExportProcessorOptions` are not configured.
+  ([#7399](https://github.com/open-telemetry/opentelemetry-dotnet/pull/7399))
+
+* The library is now marked as trim and AOT compatible.
+  ([#7441](https://github.com/open-telemetry/opentelemetry-dotnet/pull/7441))
+
+* Fixed the OTLP exporter dropping retryable data instead of saving it to disk
+  when persistent storage retry is enabled and an export exceeds the configured
+  timeout.
+  ([#7447](https://github.com/open-telemetry/opentelemetry-dotnet/pull/7447))
+
+* Cached pre-serialized metric metadata (`Name` / `Description` / `Unit`) to avoid
+  re-encoding on every OTLP metric export.
+  ([#7307](https://github.com/open-telemetry/opentelemetry-dotnet/pull/7307))
+
+* Fixed the OTLP/HTTP exporter silently dropping data when an export timed out.
+  ([#7455](https://github.com/open-telemetry/opentelemetry-dotnet/pull/7455))
+
+* Fixed the OTLP/gRPC exporter logging incorrectly when an export timed out.
+  ([#7455](https://github.com/open-telemetry/opentelemetry-dotnet/pull/7455))
+
+* The `Resource` Schema URL is now exported on the OTLP `ResourceSpans`,
+  `ResourceMetrics`, and `ResourceLogs` messages.
+  ([#7472](https://github.com/open-telemetry/opentelemetry-dotnet/pull/7472))
+
+## 1.16.0
+
+Released 2026-Jun-10
+
+## 1.16.0-rc.1
+
+Released 2026-Jun-10
+
+* Fixed `NullReferenceException` when exporting logs if the scope key is null.
+  ([#7186](https://github.com/open-telemetry/opentelemetry-dotnet/pull/7186))
+
+* Added opt-in support for gzip compression. Compression can be configured
+  programmatically via the new `OtlpExporterOptions.Compression` property,
+  or through the environment variables such as `OTEL_EXPORTER_OTLP_COMPRESSION=gzip`.
+  ([#7055](https://github.com/open-telemetry/opentelemetry-dotnet/issues/7055))
+
+* Fixed disk retry data being stored incorrectly when using persistent storage
+  retry.
+  ([#7228](https://github.com/open-telemetry/opentelemetry-dotnet/pull/7228))
+
+* Reverted `OtlpLogExporter` from using `IHttpClientFactory` on .NET 8+ to fix
+  an issue with circular dependencies detected by some dependency injection
+  container implementations such as Autofac.
+  ([#7234](https://github.com/open-telemetry/opentelemetry-dotnet/pull/7234))
+
+* Fixed `OtlpLogExporter` integration with `IHttpClientFactory` so named clients
+  can be used without triggering circular dependencies during logger construction.
+  ([#7298](https://github.com/open-telemetry/opentelemetry-dotnet/pull/7298))
+
+* Reduce the overhead of GZip compression.
+  ([#7275](https://github.com/open-telemetry/opentelemetry-dotnet/pull/7275))
+
+* Cached pre-serialized resource bytes to avoid re-encoding on every OTLP export.
+  ([#7303](https://github.com/open-telemetry/opentelemetry-dotnet/pull/7303))
+
+* Do not enable the integration with `IHttpClientFactory` when mTLS is enabled.
+  ([#7305](https://github.com/open-telemetry/opentelemetry-dotnet/pull/7305))
+
+* Handle `Retry-After` response headers that specify a date instead of a delay.
+  ([#7364](https://github.com/open-telemetry/opentelemetry-dotnet/pull/7364))
+
+* `observed_time_unix_nano` will no longer always be identical to `time_unix_nano`
+  when using the logs bridge API. By default, it will instead be set to the actual
+  observed time of the log record.
+  ([#6979](https://github.com/open-telemetry/opentelemetry-dotnet/pull/6979))
+
+* Fixed the retry deadline check so a `Retry-After` delay (whether a delta or an
+  HTTP-date) that would extend a retry beyond the configured export timeout now
+  correctly fails fast and drops the data.
+  ([#7375](https://github.com/open-telemetry/opentelemetry-dotnet/pull/7375))
+
+## 1.15.3
+
+Released 2026-Apr-21
+
+* `OtlpLogExporter` now uses `IHttpClientFactory` on .NET 8+, matching the
+  behaviour of the trace and metrics exporters.
+  ([#7109](https://github.com/open-telemetry/opentelemetry-dotnet/pull/7109))
+
+* Fixed an issue in persistent storage cleanup where malformed `.blob`, `.tmp`,
+  or `.lock` filenames could throw and interrupt maintenance to resolve
+  [GHSA-88hf-wf7h-7w4m](https://github.com/advisories/GHSA-88hf-wf7h-7w4m).
+  ([#7108](https://github.com/open-telemetry/opentelemetry-dotnet/pull/7108))
+
+* **Breaking change:** Fixed an insecure disk retry default. Disk retry now
+  requires `OTEL_DOTNET_EXPERIMENTAL_OTLP_DISK_RETRY_DIRECTORY_PATH` when
+  `OTEL_DOTNET_EXPERIMENTAL_OTLP_RETRY=disk` is configured. The exporter no
+  longer falls back to a shared temp directory by default.
+  To retain the previous behaviour, set the
+  `OTEL_DOTNET_EXPERIMENTAL_OTLP_DISK_RETRY_DIRECTORY_PATH` environment
+  variable to the value one of the following environment variables:
+
+  * `TMP`, `TMP`, or `USERPROFILE` ([Windows](https://learn.microsoft.com/windows/win32/api/fileapi/nf-fileapi-gettemppath2w#remarks))
+  * `TMPDIR` (or the literal value `/tmp/`) ([Linux](https://learn.microsoft.com/dotnet/api/system.io.path.gettemppath?tabs=linux),
+      [macOS](https://learn.microsoft.com/dotnet/api/system.io.path.gettemppath?tabs=macos)).
+
+  This change resolves
+  [GHSA-4625-4j76-fww9](https://github.com/open-telemetry/opentelemetry-dotnet/security/advisories/GHSA-4625-4j76-fww9).
+
+  ([#7106](https://github.com/open-telemetry/opentelemetry-dotnet/pull/7106))
+
+* Fixed an issue in OTLP/gRPC retry handling when parsing gRPC statuses to
+  resolve [GHSA-mr8r-92fq-pj8p](https://github.com/advisories/GHSA-mr8r-92fq-pj8p).
+  ([#7064](https://github.com/open-telemetry/opentelemetry-dotnet/pull/7064))
+
+* Fixed an issue with OTLP disk retry storage where metrics and logs used the
+  traces storage directory. Disk retry storage is now separated by signal using
+  `traces`, `metrics`, and `logs` directories.
+  ([#7074](https://github.com/open-telemetry/opentelemetry-dotnet/pull/7074))
+
+* Fixed full OTLP endpoint being logged by internal diagnostics.
+  ([#7116](https://github.com/open-telemetry/opentelemetry-dotnet/pull/7116))
+
+* Fix `OTEL_SPAN_ATTRIBUTE_VALUE_LENGTH_LIMIT` not being applied.
+  ([#7115](https://github.com/open-telemetry/opentelemetry-dotnet/pull/7115))
+
+## 1.15.2
+
+Released 2026-Apr-08
+
+* Limit how much of the response body is read when export fails and
+  error logging is enabled to resolve
+  [GHSA-q834-8qmm-v933](https://github.com/advisories/GHSA-q834-8qmm-v933).
+  ([#7017](https://github.com/open-telemetry/opentelemetry-dotnet/pull/7017))
+
+## 1.15.1
+
+Released 2026-Mar-27
+
+## 1.15.0
+
+Released 2026-Jan-21
+
+* Added mTLS configuration support for the OTLP exporter (client cert/key and
+  CA certificate options).
+  ([#6343](https://github.com/open-telemetry/opentelemetry-dotnet/pull/6343))
+
+* Added `UserAgentProductIdentifier` property to `OtlpExporterOptions` to allow
+  custom product identifiers to be prepended to the User-Agent header. When set,
+  the custom identifier is prepended with a space separator to the default
+  User-Agent string (e.g., `MyApp/1.0 OTel-OTLP-Exporter-Dotnet/1.14.0`).
+  ([#6686](https://github.com/open-telemetry/opentelemetry-dotnet/pull/6686))
+
+* Added support for `ActivitySource.TelemetrySchemaUrl` property.
+  ([#6730](https://github.com/open-telemetry/opentelemetry-dotnet/pull/6730))
+
+* Added support for `Meter.TelemetrySchemaUrl` property.
+  ([#6731](https://github.com/open-telemetry/opentelemetry-dotnet/pull/6731))
+
+* Fix `NullReferenceException` when no bucket boundaries configured for a view.
+  ([#6773](https://github.com/open-telemetry/opentelemetry-dotnet/pull/6773))
+
+* Added support for `OTEL_EXPORTER_OTLP_METRICS_DEFAULT_HISTOGRAM_AGGREGATION`
+  environment variable to configure the default histogram aggregation for
+  histogram instruments. Valid values are `explicit_bucket_histogram` (default)
+  and `base2_exponential_bucket_histogram`. Explicit views configured via
+  `AddView` take precedence over this setting.
+  ([#6778](https://github.com/open-telemetry/opentelemetry-dotnet/pull/6778))
+
+## 1.14.0
+
+Released 2025-Nov-12
+
+* **Breaking Change** NuGet packages now use the Sigstore bundle format
+  (`.sigstore.json`) for digital signatures instead of separate signature
+  (`.sig`) and certificate (`.pem`) files. This requires cosign 3.0 or later
+  for verification. See the [Digital signing
+  section](../../README.md#digital-signing) for updated verification instructions.
+  ([#6623](https://github.com/open-telemetry/opentelemetry-dotnet/pull/6623))
+
+## 1.14.0-rc.1
+
+Released 2025-Oct-21
+
+* Changed histogram protobuf serialization to use packed format for `bucket_counts`
+  and `explicit_bounds` to be specification-compliant and fix issues with strict
+  OTLP parsers. Lenient parsers should handle both formats.
+  ([#6567](https://github.com/open-telemetry/opentelemetry-dotnet/pull/6567))
+
+* Add support for .NET 10.0.
+  ([#6307](https://github.com/open-telemetry/opentelemetry-dotnet/pull/6307))
+
+## 1.13.1
+
+Released 2025-Oct-09
+
+## 1.13.0
+
+Released 2025-Oct-01
+
+* Fixed an issue in .NET Framework where OTLP export of traces, logs, and
+  metrics using `OtlpExportProtocol.Grpc` did not correctly set the initial
+  write position, resulting in gRPC protocol errors.
+  ([#6280](https://github.com/open-telemetry/opentelemetry-dotnet/pull/6280))
+
+* If `EventName` is specified either through `ILogger` or the experimental
+  log bridge API, it is exported as `EventName` by default instead of
+  `logrecord.event.name` which was previously behind the
+  `OTEL_DOTNET_EXPERIMENTAL_OTLP_EMIT_EVENT_LOG_ATTRIBUTES` feature flag.
+  Note that exporting `logrecord.event.id` is still behind that same feature
+  flag. ([#6306](https://github.com/open-telemetry/opentelemetry-dotnet/pull/6306))
+
+* gRPC calls to export traces, logs, and metrics using `OtlpExportProtocol.Grpc`
+  now set the `TE=trailers` HTTP request header to improve interoperability.
+  ([#6449](https://github.com/open-telemetry/opentelemetry-dotnet/pull/6449))
+
+* Improved performance exporting `byte[]` attributes as native binary format
+  instead of arrays.
+  ([#6534](https://github.com/open-telemetry/opentelemetry-dotnet/pull/6534))
+
+## 1.12.0
+
+Released 2025-Apr-29
+
+* **Breaking Change**: .NET Framework and .NET Standard builds now default to
+  exporting over OTLP/HTTP instead of OTLP/gRPC. **This change could result in a
+  failure to export telemetry unless appropriate measures are taken.**
+  Additionally, if you explicitly configure the exporter to use OTLP/gRPC it may
+  result in a `NotSupportedException` without further configuration. Please
+  carefully review issue
+  ([#6209](https://github.com/open-telemetry/opentelemetry-dotnet/pull/6209))
+  for additional information and workarounds.
+  ([#6229](https://github.com/open-telemetry/opentelemetry-dotnet/pull/6229))
+
+## 1.11.2
+
+Released 2025-Mar-04
+
+* Fixed a bug in .NET Framework gRPC export client where the default success
+  export response was incorrectly marked as false, now changed to true, ensuring
+  exports are correctly marked as successful.
+  ([#6099](https://github.com/open-telemetry/opentelemetry-dotnet/pull/6099))
+
+* Fixed an issues causing trace exports to fail when
+  `Activity.StatusDescription` exceeds 127 bytes.
+  ([#6119](https://github.com/open-telemetry/opentelemetry-dotnet/pull/6119))
+
+* Fixed incorrect log serialization of attributes with null values, causing
+  some backends to reject logs.
+  ([#6149](https://github.com/open-telemetry/opentelemetry-dotnet/pull/6149))
+
+## 1.11.1
+
+Released 2025-Jan-22
+
+* Fixed an issue where the OTLP gRPC exporter did not export logs, metrics, or
+  traces in .NET Framework projects.
+  ([#6083](https://github.com/open-telemetry/opentelemetry-dotnet/pull/6083))
+
+## 1.11.0
+
+Released 2025-Jan-15
+
+## 1.11.0-rc.1
+
+Released 2024-Dec-11
+
+* Removed the following package references:
+
+  * `Google.Protobuf`
+  * `Grpc`
+  * `Grpc.Net.Client`
+
+  These changes were made to streamline dependencies and reduce the footprint of
+  the exporter.
+  ([#6005](https://github.com/open-telemetry/opentelemetry-dotnet/pull/6005))
+
+* Switched from using the `Google.Protobuf` library for serialization to a
+  custom manual implementation of protobuf serialization.
+  ([#6005](https://github.com/open-telemetry/opentelemetry-dotnet/pull/6005))
+
+* Fixed an issue where a `service.name` was added to the resource if it was
+  missing. The exporter now respects the resource data provided by the SDK
+  without modifications.
+  ([#6015](https://github.com/open-telemetry/opentelemetry-dotnet/pull/6015))
+
+* Removed the peer service resolver, which was based on earlier experimental
+  semantic conventions that are not part of the stable specification. This
+  change ensures that the exporter no longer modifies or assumes the value of
+  peer service attributes, aligning it more closely with OpenTelemetry protocol
+  specifications.
+  ([#6005](https://github.com/open-telemetry/opentelemetry-dotnet/pull/6005))
+
+## 1.10.0
+
+Released 2024-Nov-12
+
+## 1.10.0-rc.1
+
+Released 2024-Nov-01
+
+* Added support for exporting instrumentation scope attributes from
+  `ActivitySource.Tags`.
+  ([#5897](https://github.com/open-telemetry/opentelemetry-dotnet/pull/5897))
+
+## 1.10.0-beta.1
+
+Released 2024-Sep-30
+
+* **Breaking change**: Non-primitive attribute (logs) and tag (traces) values
+  converted using `Convert.ToString` will now format using
+  `CultureInfo.InvariantCulture`.
+  ([#5700](https://github.com/open-telemetry/opentelemetry-dotnet/pull/5700))
+
+* Fixed an issue causing `NotSupportedException`s to be thrown on startup when
+  `AddOtlpExporter` registration extensions are called while using custom
+  dependency injection containers which automatically create services (Unity,
+  Grace, etc.).
+  ([#5808](https://github.com/open-telemetry/opentelemetry-dotnet/pull/5808))
+
+  * Fixed `PlatformNotSupportedException`s being thrown during export when running
+  on mobile platforms which caused telemetry to be dropped silently.
+  ([#5821](https://github.com/open-telemetry/opentelemetry-dotnet-contrib/pull/5821))
+
+## 1.9.0
+
+Released 2024-Jun-14
+
+## 1.9.0-rc.1
+
+Released 2024-Jun-07
+
+* The experimental APIs previously covered by `OTEL1000`
+  (`LoggerProviderBuilder.AddOtlpExporter` extension) are now part of the public
+  API and supported in stable builds.
+  ([#5648](https://github.com/open-telemetry/opentelemetry-dotnet/pull/5648))
+
+## 1.9.0-alpha.1
+
+Released 2024-May-20
+
+* `User-Agent` header format changed from
+  `OTel-OTLP-Exporter-Dotnet/{NuGet Package Version}+{Commit Hash}`
+  to `OTel-OTLP-Exporter-Dotnet/{NuGet Package Version}`.
+  ([#5528](https://github.com/open-telemetry/opentelemetry-dotnet/pull/5528))
+
+* Implementation of [OTLP
+  specification](https://github.com/open-telemetry/opentelemetry-proto/blob/v1.2.0/opentelemetry/proto/trace/v1/trace.proto#L112-L133)
+  for propagating `Span` and `SpanLink` flags containing W3C trace flags and
+  `parent_is_remote` information.
+  ([#5563](https://github.com/open-telemetry/opentelemetry-dotnet/pull/5563))
+
+* Introduced experimental support for automatically retrying export to the otlp
+  endpoint by storing the telemetry offline during transient network errors.
+  Users can enable this feature by setting the
+  `OTEL_DOTNET_EXPERIMENTAL_OTLP_RETRY` environment variable to `disk`. The
+  default path where the telemetry is stored is obtained by calling
+  [Path.GetTempPath()](https://learn.microsoft.com/dotnet/api/system.io.path.gettemppath)
+  or can be customized by setting
+  `OTEL_DOTNET_EXPERIMENTAL_OTLP_DISK_RETRY_DIRECTORY_PATH` environment
+  variable.
+  ([#5527](https://github.com/open-telemetry/opentelemetry-dotnet/pull/5527))
+
+## 1.8.1
+
+Released 2024-Apr-17
+
+* Fix native AoT warnings in `OpenTelemetry.Exporter.OpenTelemetryProtocol`.
+  ([#5520](https://github.com/open-telemetry/opentelemetry-dotnet/pull/5520))
+
+## 1.8.0
+
+Released 2024-Apr-02
+
+* `OtlpExporter` will no longer throw an exception (even on .NET Core 3.1)
+   when the `System.Net.Http.SocketsHttpHandler.Http2UnencryptedSupport`
+  `AppContext` switch is NOT set AND using `OtlpExportProtocol.Grpc`
+  to send to an insecure ("http") endpoint.
+  `System.Net.Http.SocketsHttpHandler.Http2UnencryptedSupport`
+  is not required to be set [when using .NET 5 or newer](https://learn.microsoft.com/aspnet/core/grpc/troubleshoot?view=aspnetcore-8.0#call-insecure-grpc-services-with-net-core-client).
+  ([#5486](https://github.com/open-telemetry/opentelemetry-dotnet/pull/5486))
+
+* Replaced environment variable
+  `OTEL_DOTNET_EXPERIMENTAL_OTLP_ENABLE_INMEMORY_RETRY` with
+  `OTEL_DOTNET_EXPERIMENTAL_OTLP_RETRY`. `OTEL_DOTNET_EXPERIMENTAL_OTLP_RETRY`
+  when set to `in_memory` will enable automatic retries in case of transient
+  failures during data export to an OTLP endpoint.
+  ([#5495](https://github.com/open-telemetry/opentelemetry-dotnet/pull/5495))
+
+## 1.8.0-rc.1
+
+Released 2024-Mar-27
+
+## 1.8.0-beta.1
+
+Released 2024-Mar-14
+
+* **Experimental (pre-release builds only):** Added
+  `LoggerProviderBuilder.AddOtlpExporter` registration extensions.
+  [#5103](https://github.com/open-telemetry/opentelemetry-dotnet/pull/5103)
+
+* Removed the `OTEL_DOTNET_EXPERIMENTAL_OTLP_EMIT_EXCEPTION_LOG_ATTRIBUTES`
+  environment variable, following the stabilization of the exception attributes
+  `exception.type`, `exception.message`, and `exception.stacktrace` in the
+  [OpenTelemetry Semantic
+  Conventions](https://github.com/open-telemetry/semantic-conventions/blob/main/docs/exceptions/exceptions-logs.md#semantic-conventions-for-exceptions-in-logs).
+  These attributes, corresponding to `LogRecord.Exception`, are now stable and
+  will be automatically included in exports.
+  ([#5258](https://github.com/open-telemetry/opentelemetry-dotnet/pull/5258))
+
+* Updated `OtlpLogExporter` to set `body` on the data model from
+  `LogRecord.Body` if `{OriginalFormat}` attribute is NOT found and
+  `FormattedMessage` is `null`. This is typically the case when using the
+  experimental Logs Bridge API.
+  ([#5268](https://github.com/open-telemetry/opentelemetry-dotnet/pull/5268))
+
+* Updated `OtlpLogExporter` to set instrumentation scope name on the data model
+  from `LogRecord.Logger.Name` if `LogRecord.CategoryName` is `null`. This is
+  typically the case when using the experimental Logs Bridge API.
+  ([#5300](https://github.com/open-telemetry/opentelemetry-dotnet/pull/5300))
+
+* URL encoded values in `OTEL_EXPORTER_OTLP_HEADERS` are now correctly decoded
+  as it is mandated by the specification.
+  ([#5316](https://github.com/open-telemetry/opentelemetry-dotnet/pull/5268))
+
+* **Experimental (pre-release builds only):** Add support in
+  `OtlpMetricExporter` for emitting exemplars supplied on Counters, Gauges, and
+  ExponentialHistograms.
+  ([#5397](https://github.com/open-telemetry/opentelemetry-dotnet/pull/5397))
+
+* Setting `Endpoint` or `HttpClientFactory` properties on `OtlpExporterOptions`
+  to `null` will now result in an `ArgumentNullException` being thrown.
+  ([#5434](https://github.com/open-telemetry/opentelemetry-dotnet/pull/5434))
+
+* Introduced experimental support for automatically retrying export to the otlp
+  endpoint when transient network errors occur. Users can enable this feature by
+  setting `OTEL_DOTNET_EXPERIMENTAL_OTLP_ENABLE_INMEMORY_RETRY` environment
+  variable to true.
+  ([#5435](https://github.com/open-telemetry/opentelemetry-dotnet/pull/5435))
+
+* Added `IOpenTelemetryBuilder.UseOtlpExporter` extension to simplify setup of
+  the OTLP Exporter when all three signals are used (logs, metrics, and traces).
+  The new extension has the following behaviors:
+
+  * Calling `UseOtlpExporter` will automatically enable logging, tracing, and
+    metrics. Additional calls to `WithLogging`, `WithMetrics`, and `WithTracing`
+    are NOT required however for metrics and tracing sources/meters still need
+    to be enabled.
+
+  * `UseOtlpExporter` can only be called once and cannot be used with the
+    existing `AddOtlpExporter` extensions. Extra calls will result in
+    `NotSupportedException`s being thrown.
+
+  * `UseOtlpExporter` will register the OTLP Exporter at the end of the
+    processor pipeline for logging and tracing.
+
+  * The OTLP Exporters added for logging, tracing, and metrics can be configured
+    using environment variables or `IConfiguration`.
+
+  For details see: [README > Enable OTLP Exporter for all
+  signals](./README.md#enable-otlp-exporter-for-all-signals).
+
+  PR: [#5400](https://github.com/open-telemetry/opentelemetry-dotnet/pull/5400)
+
+## 1.7.0
+
+Released 2023-Dec-08
+
+## 1.7.0-rc.1
+
+Released 2023-Nov-29
+
+* Made `OpenTelemetry.Exporter.OtlpLogExporter` public.
+  ([#4979](https://github.com/open-telemetry/opentelemetry-dotnet/pull/4979))
+
+* Updated the `OpenTelemetryLoggerOptions.AddOtlpExporter` extension to retrieve
+  `OtlpExporterOptions` and `LogRecordExportProcessorOptions` using the
+  `IServiceProvider` / Options API so that they can be controlled via
+  `IConfiguration` (similar to metrics and traces).
+  ([#4916](https://github.com/open-telemetry/opentelemetry-dotnet/pull/4916))
+
+* Added an `OpenTelemetryLoggerOptions.AddOtlpExporter` extension overload which
+  accepts a `name` parameter to support named options.
+  ([#4916](https://github.com/open-telemetry/opentelemetry-dotnet/pull/4916))
+
+* Add support for Instrumentation Scope Attributes (i.e [Meter
+  Tags](https://learn.microsoft.com/dotnet/api/system.diagnostics.metrics.meter.tags)),
+  fixing issue
+  [#4563](https://github.com/open-telemetry/opentelemetry-dotnet/issues/4563).
+  ([#5089](https://github.com/open-telemetry/opentelemetry-dotnet/pull/5089))
+
+## 1.7.0-alpha.1
+
+Released 2023-Oct-16
+
+* Bumped the version of `Google.Protobuf` used by the project to `3.22.5` so
+  that consuming applications can be published as NativeAOT successfully. Also,
+  a new performance feature can be used instead of reflection emit, which is
+  not AOT-compatible. Removed the dependency on `System.Reflection.Emit.Lightweight`.
+  ([#4859](https://github.com/open-telemetry/opentelemetry-dotnet/pull/4859))
+
+* Added support for `OTEL_LOGRECORD_ATTRIBUTE_VALUE_LENGTH_LIMIT`
+  and `OTEL_LOGRECORD_ATTRIBUTE_COUNT_LIMIT`.
+  ([#4887](https://github.com/open-telemetry/opentelemetry-dotnet/pull/4887))
+
+* Added ability to export attributes corresponding to `LogRecord.Exception` i.e.
+`exception.type`, `exception.message` and `exception.stacktrace`. These
+attributes will be exported when
+`OTEL_DOTNET_EXPERIMENTAL_OTLP_EMIT_EXCEPTION_LOG_ATTRIBUTES` environment
+variable will be set to `true`.
+
+  **NOTE**: These attributes were removed in [1.6.0-rc.1](#160-rc1) release in
+  order to support stable release of OTLP Log Exporter. The attributes will now
+  be available via environment variable mentioned above.
+  ([#4892](https://github.com/open-telemetry/opentelemetry-dotnet/pull/4892))
+
+* Added ability to export attributes corresponding to `LogRecord.EventId.Id` as
+`logrecord.event.id` and `LogRecord.EventId.Name` as `logrecord.event.name`. The
+attributes will be exported when
+`OTEL_DOTNET_EXPERIMENTAL_OTLP_EMIT_EVENT_LOG_ATTRIBUTES` will be set to `true`.
+
+  **NOTE**: These attributes were removed in [1.6.0-rc.1](#160-rc1) release in
+  order to support stable release of OTLP Log Exporter. The attributes will now
+  be available via environment variable mentioned above.
+  ([#4925](https://github.com/open-telemetry/opentelemetry-dotnet/pull/4925))
+
+* `LogRecord.CategoryName` will now be exported as
+[InstrumentationScope](https://github.com/open-telemetry/opentelemetry-dotnet/blob/3c2bb7c93dd2e697636479a1882f49bb0c4a362e/src/OpenTelemetry.Exporter.OpenTelemetryProtocol/Implementation/opentelemetry/proto/common/v1/common.proto#L71-L81)
+`name` field under
+[ScopeLogs](https://github.com/open-telemetry/opentelemetry-dotnet/blob/3c2bb7c93dd2e697636479a1882f49bb0c4a362e/src/OpenTelemetry.Exporter.OpenTelemetryProtocol/Implementation/opentelemetry/proto/logs/v1/logs.proto#L64-L75).
+([#4941](https://github.com/open-telemetry/opentelemetry-dotnet/pull/4941))
+
+## 1.6.0
+
+Released 2023-Sep-05
+
+## 1.6.0-rc.1
+
+Released 2023-Aug-21
+
+* **Breaking change**: Excluded attributes corresponding to
+`LogRecord.Exception`, `LogRecord.EventId` and `LogRecord.CategoryName` from the
+exported data. See following details for reasoning behind removing each
+individual property:
+  * `LogRecord.Exception`: The semantic conventions for attributes corresponding
+    to exception data are not yet stable. Track issue
+    [#4831](https://github.com/open-telemetry/opentelemetry-dotnet/issues/4831)
+    for details.
+  * `LogRecord.EventId`: The attributes corresponding to this property are
+    specific to .NET logging data model and there is no established convention
+    defined for them yet. Track issue
+    [#4776](https://github.com/open-telemetry/opentelemetry-dotnet/issues/4776)
+    for details.
+  * `LogRecord.CategoryName`: The attribute corresponding to this property is
+    specific to .NET logging data model and there is no established convention
+    defined for it yet. Track issue
+    [#3491](https://github.com/open-telemetry/opentelemetry-dotnet/issues/3491)
+    for details.
+
+  This change is temporarily done in order to release **stable** version of OTLP
+  Log Exporter.
+  ([#4781](https://github.com/open-telemetry/opentelemetry-dotnet/pull/4781))
+
+* Added extension method for configuring export processor options for otlp log
+exporter.
+([#4733](https://github.com/open-telemetry/opentelemetry-dotnet/pull/4733))
+
+* Added support for configuring the metric exporter's temporality using the
+  environment variable `OTEL_EXPORTER_OTLP_METRICS_TEMPORALITY_PREFERENCE` as
+  defined in the
+  [specification](https://github.com/open-telemetry/opentelemetry-specification/blob/v1.23.0/specification/metrics/sdk_exporters/otlp.md#additional-configuration).
+  ([#4667](https://github.com/open-telemetry/opentelemetry-dotnet/pull/4667))
+
+## 1.6.0-alpha.1
+
+Released 2023-Jul-12
+
+* Merged `OpenTelemetry.Exporter.OpenTelemetryProtocol.Logs` package into
+  `OpenTelemetry.Exporter.OpenTelemetryProtocol`. Going Forward,
+  `OpenTelemetry.Exporter.OpenTelemetryProtocol` will be the only package needed
+  for all 3 signals (Logs, Metrics, and Traces). All the changes made in
+  [`OpenTelemetry.Exporter.OpenTelemetryProtocol.Logs`](https://github.com/open-telemetry/opentelemetry-dotnet/blob/core-1.5.0/src/OpenTelemetry.Exporter.OpenTelemetryProtocol.Logs/CHANGELOG.md#changelog)
+  are now included in this package.
+  ([#4556](https://github.com/open-telemetry/opentelemetry-dotnet/pull/4556))
+
+* Updated Grpc.Net.Client to `2.45.0` to fix unobserved exception
+  from failed calls.
+  ([#4573](https://github.com/open-telemetry/opentelemetry-dotnet/pull/4573))
+
+* Updated Grpc.Net.Client to `2.52.0` to address the vulnerability reported by
+  CVE-2023-32731. Refer to
+  [https://github.com/grpc/grpc/pull/32309](https://github.com/grpc/grpc/pull/32309)
+  for more details.
+  ([#4647](https://github.com/open-telemetry/opentelemetry-dotnet/pull/4647))
+
+* **Experimental (pre-release builds only):**
+
+  * Note: See
+    [#4735](https://github.com/open-telemetry/opentelemetry-dotnet/pull/4735)
+    for the introduction of experimental api support.
+
+  * Add back support for Exemplars. See
+    [exemplars](../../docs/metrics/customizing-the-sdk/README.md#exemplars) for
+    instructions to enable exemplars.
+    ([#4553](https://github.com/open-telemetry/opentelemetry-dotnet/pull/4553))
+
+  * Updated to support `Severity` and `SeverityText` when exporting
+    `LogRecord`s.
+    ([#4568](https://github.com/open-telemetry/opentelemetry-dotnet/pull/4568))
+
+## 1.5.1
+
+Released 2023-Jun-26
+
+## 1.5.0
+
+Released 2023-Jun-05
+
+* Remove support for exporting `Exemplars`. This would be added back in the
+  `1.6.*` prerelease versions right after `1.5.0` stable version is released.
+  ([#4533](https://github.com/open-telemetry/opentelemetry-dotnet/pull/4533))
+
+## 1.5.0-rc.1
+
+Released 2023-May-25
+
+* Revert version of `Google.Protobuf` to `3.19.4` (see
+  [#4201](https://github.com/open-telemetry/opentelemetry-dotnet/pull/4201)).
+  This also reintroduces the `System.Reflection.Emit.Lightweight` dependency.
+  ([#4407](https://github.com/open-telemetry/opentelemetry-dotnet/pull/4407))
+
+## 1.5.0-alpha.2
+
+Released 2023-Mar-31
+
+* Add support for exporting histograms aggregated using the
+  [Base2 Exponential Bucket Histogram Aggregation](https://github.com/open-telemetry/opentelemetry-specification/blob/main/specification/metrics/sdk.md#base2-exponential-bucket-histogram-aggregation).
+  ([#4337](https://github.com/open-telemetry/opentelemetry-dotnet/pull/4337))
+
+* Added support to set `TraceState` when converting the
+  System.Diagnostics.Activity object to its corresponding
+  OpenTelemetry.Proto.Trace.V1.Span object.
+  ([#4331](https://github.com/open-telemetry/opentelemetry-dotnet/pull/4331))
+
+## 1.5.0-alpha.1
+
+Released 2023-Mar-07
+
+* Bumped the version of `Google.Protobuf` used by the project to `3.22.0` so
+  that a new performance feature can be used instead of reflection. Removed the
+  dependency on `System.Reflection.Emit.Lightweight`.
+  ([#4201](https://github.com/open-telemetry/opentelemetry-dotnet/pull/4201))
+
+* Added Exemplar support. See [exemplars](../../docs/metrics/customizing-the-sdk/README.md#exemplars)
+  for instructions to enable exemplars.
+
+## 1.4.0
+
+Released 2023-Feb-24
+
+* Updated OTel SDK dependency to 1.4.0
+
+* `AddOtlpExporter` extension methods will now always create a new options
+  instance when named options are NOT used.
+  ([#4200](https://github.com/open-telemetry/opentelemetry-dotnet/pull/4200))
+
+## 1.4.0-rc.4
+
+Released 2023-Feb-10
+
+* Added a direct dependency on System.Reflection.Emit.Lightweight which
+  previously came transitively through the OpenTelemetry SDK.
+  ([#4140](https://github.com/open-telemetry/opentelemetry-dotnet/pull/4140))
+
+## 1.4.0-rc.3
+
+Released 2023-Feb-01
+
+* Include User-Agent header
+  [per the specification](https://github.com/open-telemetry/opentelemetry-specification/blob/main/specification/protocol/exporter.md#user-agent).
+  ([#4120](https://github.com/open-telemetry/opentelemetry-dotnet/pull/4120))
+
+## 1.4.0-rc.2
+
+Released 2023-Jan-09
+
+* For `AddOtlpExporter` extension methods, configuration delegates will be
+  executed inline and not through Options API when named options are NOT used.
+  ([#4058](https://github.com/open-telemetry/opentelemetry-dotnet/pull/4058))
+
+## 1.4.0-rc.1
+
+Released 2022-Dec-12
+
+* Fix default values for `OTEL_ATTRIBUTE_COUNT_LIMIT`,
+  `OTEL_ATTRIBUTE_COUNT_LIMIT`,
+  `OTEL_SPAN_ATTRIBUTE_COUNT_LIMIT`,
+  `OTEL_SPAN_EVENT_COUNT_LIMIT`,
+  `OTEL_SPAN_LINK_COUNT_LIMIT`,
+  `OTEL_EVENT_ATTRIBUTE_COUNT_LIMIT`,
+  `OTEL_LINK_ATTRIBUTE_COUNT_LIMIT`. All of them are defaulted to `128`.
+  ([#3978](https://github.com/open-telemetry/opentelemetry-dotnet/pull/3978))
+
+## 1.4.0-beta.3
+
+Released 2022-Nov-07
+
+* Log Exporter modified to no longer prefix scope-depth when exporting ILogger
+  scopes as attributes. Empty keys and {OriginalFormat} key will be ignored from
+  scopes.
+  ([#3843](https://github.com/open-telemetry/opentelemetry-dotnet/pull/3843))
+
+## 1.4.0-beta.2
+
+Released 2022-Oct-17
+
+* OTLP histogram data points will now include `Min` and `Max` values when
+  they are present.
+  ([#2735](https://github.com/open-telemetry/opentelemetry-dotnet/pull/2735))
+
+* Adds support for limiting the length and count of attributes exported from
+  the OTLP log exporter. These
+  [Attribute Limits](https://github.com/open-telemetry/opentelemetry-specification/blob/main/specification/configuration/sdk-environment-variables.md#attribute-limits)
+  are configured via the environment variables defined in the specification.
+  ([#3684](https://github.com/open-telemetry/opentelemetry-dotnet/pull/3684))
+
+* Added support for loading environment variables from `IConfiguration` when
+  using the `AddOtlpExporter` extensions
+  ([#3760](https://github.com/open-telemetry/opentelemetry-dotnet/pull/3760))
+
+## 1.4.0-beta.1
+
+Released 2022-Sep-29
+
+* Added overloads which accept a name to the `MeterProviderBuilder`
+  `AddOtlpExporter` extension to allow for more fine-grained options management
+  ([#3648](https://github.com/open-telemetry/opentelemetry-dotnet/pull/3648))
+
+* Added overloads which accept a name to the `TracerProviderBuilder`
+  `AddOtlpExporter` extension to allow for more fine-grained options management
+  ([#3653](https://github.com/open-telemetry/opentelemetry-dotnet/pull/3653))
+
+## 1.4.0-alpha.2
+
+Released 2022-Aug-18
+
+* When using [Attribute
+  Limits](https://github.com/open-telemetry/opentelemetry-specification/blob/main/specification/configuration/sdk-environment-variables.md#attribute-limits)
+  the OTLP exporter will now send "dropped" counts where applicable (ex:
+  [dropped_attributes_count](https://github.com/open-telemetry/opentelemetry-proto/blob/001e5eabf3ea0193ef9343c1b9a057d23d583d7c/opentelemetry/proto/trace/v1/trace.proto#L191)).
+  ([#3580](https://github.com/open-telemetry/opentelemetry-dotnet/pull/3580))
+
+## 1.4.0-alpha.1
+
+Released 2022-Aug-02
+
+* Adds support for limiting the length and count of attributes exported from
+  the OTLP exporter. These
+  [Attribute Limits](https://github.com/open-telemetry/opentelemetry-specification/blob/main/specification/configuration/sdk-environment-variables.md#attribute-limits)
+  are configured via the environment variables defined in the specification.
+  ([#3376](https://github.com/open-telemetry/opentelemetry-dotnet/pull/3376))
+
+* The `MetricReaderOptions` defaults can be overridden using
+  `OTEL_METRIC_EXPORT_INTERVAL` and `OTEL_METRIC_EXPORT_TIMEOUT`
+  environmental variables as defined in the
+  [specification](https://github.com/open-telemetry/opentelemetry-specification/blob/v1.12.0/specification/sdk-environment-variables.md#periodic-exporting-metricreader).
+  ([#3424](https://github.com/open-telemetry/opentelemetry-dotnet/pull/3424))
+
+## 1.3.0
+
+Released 2022-Jun-03
+
+## 1.3.0-rc.2
+
+Released 2022-June-1
+
+## 1.3.0-beta.2
+
+Released 2022-May-16
+
+* LogExporter to support Logging Scopes.
+  ([#3218](https://github.com/open-telemetry/opentelemetry-dotnet/pull/3218))
+
+* Support `HttpProtobuf` protocol with logs & added `HttpClientFactory`
+option
+ ([#3225](https://github.com/open-telemetry/opentelemetry-dotnet/pull/3225))
+
+* Removes net5.0 target and replaced with net6.0
+  as .NET 5.0 is going out of support.
+  The package keeps netstandard2.1 target, so it
+  can still be used with .NET5.0 apps.
+  ([#3147](https://github.com/open-telemetry/opentelemetry-dotnet/issues/3147))
+
+* Fix handling of array-valued attributes for the OTLP trace exporter.
+  ([#3238](https://github.com/open-telemetry/opentelemetry-dotnet/pull/3238))
+
+* Improve the conversion and formatting of attribute values to the OTLP format.
+  The list of data types that must be supported per the
+  [OpenTelemetry specification](https://github.com/open-telemetry/opentelemetry-specification/tree/main/specification/common#attribute)
+  is more narrow than what the .NET OpenTelemetry SDK supports. Numeric
+  [built-in value types](https://docs.microsoft.com/dotnet/csharp/language-reference/builtin-types/built-in-types)
+  are supported by converting to a `long` or `double` as appropriate except for
+  numeric types that could cause overflow (`ulong`) or rounding (`decimal`)
+  which are converted to strings. Non-numeric built-in types - `string`,
+  `char`, `bool` are supported. All other types are converted to a `string`.
+  Array values are also supported.
+  ([#3262](https://github.com/open-telemetry/opentelemetry-dotnet/pull/3262))
+  ([#3274](https://github.com/open-telemetry/opentelemetry-dotnet/pull/3274))
+
+## 1.3.0-beta.1
+
+Released 2022-Apr-15
+
+* Removes .NET Framework 4.6.1. The minimum .NET Framework
+  version supported is .NET 4.6.2. ([#3190](https://github.com/open-telemetry/opentelemetry-dotnet/issues/3190))
+
+## 1.2.0
+
+Released 2022-Apr-15
+
+* LogExporter to correctly map Severity to OTLP.
+  ([#3177](https://github.com/open-telemetry/opentelemetry-dotnet/pull/3177))
+
+* LogExporter to special case {OriginalFormat} to populate
+  Body. ([#3182](https://github.com/open-telemetry/opentelemetry-dotnet/pull/3182))
+
+## 1.2.0-rc5
+
+Released 2022-Apr-12
+
+* Updated underlying proto files to
+  [v0.16.0](https://github.com/open-telemetry/opentelemetry-proto/releases/tag/v0.16.0).
+  The LogRecord.Name field was removed. The CategoryName provided
+  when calling CreateLogger previously populated this field. For now,
+  CategoryName is no longer exported via OTLP. It will be reintroduced
+  in the future as an attribute.
+
+## 1.2.0-rc4
+
+Released 2022-Mar-30
 
 * Added support for Activity Status and StatusDescription which were
   added to Activity from `System.Diagnostics.DiagnosticSource` version 6.0.
@@ -168,9 +1401,9 @@ Released 2021-Apr-23
   ([#1873](https://github.com/open-telemetry/opentelemetry-dotnet/pull/1873))
 
 * Null values in string arrays are preserved according to
-  [spec](https://github.com/open-telemetry/opentelemetry-specification/blob/main/specification/common/common.md).
-  ([#1919](https://github.com/open-telemetry/opentelemetry-dotnet/pull/1919)) and
-  ([#1945](https://github.com/open-telemetry/opentelemetry-dotnet/pull/1945)).
+  [spec](https://github.com/open-telemetry/opentelemetry-specification/blob/main/specification/common/README.md).
+  ([#1919](https://github.com/open-telemetry/opentelemetry-dotnet/pull/1919)
+  [#1945](https://github.com/open-telemetry/opentelemetry-dotnet/pull/1945))
 
 * When using OpenTelemetry.Extensions.Hosting you can now bind
   `OtlpExporterOptions` to `IConfiguration` using the `Configure` extension (ex:
@@ -215,7 +1448,7 @@ Released 2021-Feb-04
 
 Released 2021-Jan-29
 
-* Changed `OltpTraceExporter` class and constructor from internal to public.
+* Changed `OtlpTraceExporter` class and constructor from internal to public.
   ([#1612](https://github.com/open-telemetry/opentelemetry-dotnet/issues/1612))
 
 * In `OtlpExporterOptions.cs`: Exporter options now include a switch for Batch

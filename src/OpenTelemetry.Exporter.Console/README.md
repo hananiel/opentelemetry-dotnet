@@ -6,9 +6,12 @@
 The console exporter prints data to the Console window.
 ConsoleExporter supports exporting logs, metrics and traces.
 
-**Note:** this exporter is intended to be used during learning how telemetry
-data are created and exported. It is not recommended for any production
-environment.
+> [!WARNING]
+> This exporter is intended for debugging and learning purposes. It is not
+  recommended for production use. The output format is not standardized and can
+  change at any time.
+  If a standardized format for exporting telemetry to stdout is desired, upvote
+  on [this feature request](https://github.com/open-telemetry/opentelemetry-dotnet/issues/5920).
 
 ## Installation
 
@@ -19,9 +22,59 @@ dotnet add package OpenTelemetry.Exporter.Console
 See the individual "getting started" examples depending on the signal being
 used:
 
-* [Logs](../../docs/logs/getting-started/Program.cs)
-* [Metrics](../../docs/metrics/getting-started/Program.cs)
-* [Traces](../../docs/trace/getting-started/Program.cs)
+* Logs: [ASP.NET Core](../../docs/logs/getting-started-aspnetcore/README.md) |
+  [Console](../../docs/logs/getting-started-console/README.md)
+* Metrics: [ASP.NET
+  Core](../../docs/metrics/getting-started-aspnetcore/README.md) |
+  [Console](../../docs/metrics/getting-started-console/README.md)
+* Traces: [ASP.NET Core](../../docs/trace/getting-started-aspnetcore/README.md)
+  | [Console](../../docs/trace/getting-started-console/README.md)
+
+## Configuration
+
+See the
+[`TestConsoleExporter.cs`](../../examples/Console/TestConsoleExporter.cs) for
+an example of how to use the exporter for exporting traces to a collection.
+
+You can configure the `ConsoleExporter` through `Options` types properties
+and environment variables.
+The `Options` type setters take precedence over the environment variables.
+
+### MetricReaderOptions (metrics)
+
+For metrics, `AddConsoleExporter()` pairs the exporter with a
+`PeriodicExportingMetricReader`. Use `MetricReaderOptions` to configure
+temporality, export interval/timeout, and the maximum number of metric points in
+each exported batch:
+
+```csharp
+var meterProvider = Sdk.CreateMeterProviderBuilder()
+    // rest of config not shown here.
+    .AddConsoleExporter((_, metricReaderOptions) =>
+    {
+        metricReaderOptions.TemporalityPreference = MetricReaderTemporalityPreference.Delta;
+
+        metricReaderOptions.PeriodicExportingMetricReaderOptions.ExportIntervalMilliseconds = 10_000;
+        metricReaderOptions.PeriodicExportingMetricReaderOptions.ExportTimeoutMilliseconds = 5_000;
+        metricReaderOptions.PeriodicExportingMetricReaderOptions.MaxExportBatchSize = 1_000;
+    })
+    .Build();
+```
+
+See [`TestMetrics.cs`](../../examples/Console/TestMetrics.cs) for a runnable
+example.
+
+## Environment Variables
+
+The following environment variables can be used to override the default
+values of the `PeriodicExportingMetricReaderOptions`
+(following the [OpenTelemetry specification](https://github.com/open-telemetry/opentelemetry-specification/blob/main/specification/configuration/sdk-environment-variables.md#periodic-exporting-metricreader)).
+
+| Environment variable                | `PeriodicExportingMetricReaderOptions` property |
+| ------------------------------------| ------------------------------------------------|
+| `OTEL_METRIC_EXPORT_INTERVAL`       | `ExportIntervalMilliseconds`                    |
+| `OTEL_METRIC_EXPORT_TIMEOUT`        | `ExportTimeoutMilliseconds`                     |
+| `OTEL_METRIC_EXPORT_MAX_BATCH_SIZE` | `MaxExportBatchSize`                            |
 
 ## References
 

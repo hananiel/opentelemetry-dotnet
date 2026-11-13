@@ -2,58 +2,95 @@
   <Import Project=".\Common.props" />
 
   <PropertyGroup>
-    <NoWarn>$(NoWarn),1574,1591</NoWarn>
+    <NoWarn>$(NoWarn),CS1574,CS1591</NoWarn>
     <IsPackable>false</IsPackable>
-    <CodeAnalysisRuleSet>$([MSBuild]::GetDirectoryNameOfFileAbove($(MSBuildProjectDirectory), 'OpenTelemetry.sln'))\build\OpenTelemetry.test.ruleset</CodeAnalysisRuleSet>
+    <CodeAnalysisRuleSet>$([MSBuild]::GetDirectoryNameOfFileAbove($(MSBuildProjectDirectory), 'OpenTelemetry.slnx'))\build\OpenTelemetry.test.ruleset</CodeAnalysisRuleSet>
   </PropertyGroup>
 
-  <PropertyGroup Condition="$(MSBuildProjectName.EndsWith('.Tests'))">
+  <PropertyGroup>
+    <DefaultTargetFrameworkForExampleApps>net11.0</DefaultTargetFrameworkForExampleApps>
+  </PropertyGroup>
+
+  <PropertyGroup>
+    <SolutionDir Condition="'$(SolutionDir)' == ''">$([System.IO.Path]::GetFullPath('$(MSBuildThisFileDirectory)/..'))</SolutionDir>
+    <SolutionName Condition="'$(SolutionName)' == ''">OpenTelemetry.slnx</SolutionName>
+  </PropertyGroup>
+
+  <PropertyGroup Condition="$(MSBuildProjectName.EndsWith('.Tests')) OR $(MSBuildProjectName.EndsWith('.FuzzTests'))">
     <IsTestProject>true</IsTestProject>
+    <OutputType>Exe</OutputType>
+    <!--
+      Use the Microsoft.Testing.Platform command line (rather than the native
+      xunit.net one) when the test executable is run directly, so that the same
+      options work for `dotnet test` and for the integration tests which run
+      the published test assembly inside a container.
+    -->
+    <UseMicrosoftTestingPlatformRunner>true</UseMicrosoftTestingPlatformRunner>
   </PropertyGroup>
 
-  <ItemGroup Condition="$(MSBuildProjectName.EndsWith('.Tests'))">
-    <Content Include="$([MSBuild]::GetDirectoryNameOfFileAbove($(MSBuildProjectDirectory), 'OpenTelemetry.sln'))\build\xunit.runner.json">
-      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
-    </Content>
-    <!--Temp workaround to allow using daily dotnet 6 builds-->
-    <!--<PackageReference Include="System.Runtime.CompilerServices.Unsafe" PrivateAssets="All" NoWarn="NU1605" Version="6.0.0-preview.4.21253.7" />-->
+  <ItemGroup Condition="'$(IsTestProject)' == 'true'">
+    <PackageReference Include="GitHubActionsTestLogger" />
+    <PackageReference Include="Microsoft.Testing.Extensions.CodeCoverage" />
+    <PackageReference Include="Microsoft.Testing.Extensions.HangDump" />
+    <PackageReference Include="Microsoft.Testing.Platform" />
+    <PackageReference Include="xunit.v3.mtp-v2" />
+  </ItemGroup>
+
+  <ItemGroup Condition="'$(IsTestProject)' == 'true'">
+    <Compile Include="$(RepoRoot)\test\Shared\StrongNameTests.cs" Link="StrongNameTests.cs" />
+  </ItemGroup>
+
+  <!--
+    Gives the test host longer than the xunit.net default of 10 seconds to exit once the tests
+    have finished, as with code coverage enabled every assembly loaded while exiting waits on
+    the coverage collector, which can take that long by itself on a loaded CI agent.
+  -->
+  <ItemGroup Condition="'$(IsTestProject)' == 'true'">
+    <Content Include="$(RepoRoot)\build\xunit.runner.json" CopyToOutputDirectory="PreserveNewest" Visible="false" />
   </ItemGroup>
 
   <PropertyGroup>
     <!-- Running unit tests from VSCode does not work with .NET SDK 6.0.200 without ProduceReferenceAssemblyInOutDir -->
-    <!-- Related breaking change: https://docs.microsoft.com/en-us/dotnet/core/compatibility/sdk/6.0/write-reference-assemblies-to-obj -->
+    <!-- Related breaking change: https://docs.microsoft.com/dotnet/core/compatibility/sdk/6.0/write-reference-assemblies-to-obj -->
     <ProduceReferenceAssemblyInOutDir>true</ProduceReferenceAssemblyInOutDir>
-  </PropertyGroup>
-
-  <PropertyGroup Label="Package versions used by test and example projects">
-    <!--
-      Please sort alphabetically.
-      Refer to https://docs.microsoft.com/nuget/concepts/package-versioning for semver syntax.
-    -->
-    <BenchmarkDotNetPkgVer>[0.13.1,0.14)</BenchmarkDotNetPkgVer>
-    <CommandLineParserPkgVer>[2.3.0,3.0)</CommandLineParserPkgVer>
-    <DotNetXUnitCliVer>[2.3.1,3.0)</DotNetXUnitCliVer>
-    <GoogleProtobufPkgVer>[3.19.4,4.0)</GoogleProtobufPkgVer>
-    <GrpcAspNetCorePkgVer>[2.43.0,3.0)</GrpcAspNetCorePkgVer>
-    <GrpcAspNetCoreServerPkgVer>[2.43.0, 3.0)</GrpcAspNetCoreServerPkgVer>
-    <GrpcToolsPkgVer>[2.44.0,3.0)</GrpcToolsPkgVer>
-    <MicrosoftAspNetMvcPkgVer>[5.2.7,6.0)</MicrosoftAspNetMvcPkgVer>
-    <MicrosoftAspNetWebApiWebHostPkgVer>[5.2.7,6.0)</MicrosoftAspNetWebApiWebHostPkgVer>
-    <MicrosoftAspNetWebPagesPkgVer>[3.2.7,4.0)</MicrosoftAspNetWebPagesPkgVer>
-    <MicrosoftExtensionsHostingPkgVer>[3.1.6,5.0)</MicrosoftExtensionsHostingPkgVer>
-    <MicrosoftExtensionsLoggingPkgVer>[6.0.0,)</MicrosoftExtensionsLoggingPkgVer>
-    <MicrosoftExtensionsLoggingAbstractionsPkgVer>[6.0.0,)</MicrosoftExtensionsLoggingAbstractionsPkgVer>
-    <MicrosoftNETTestSdkPkgVer>[16.10.0]</MicrosoftNETTestSdkPkgVer>
-    <NewtonsoftJsonPkgVer>[12.0.2,13.0)</NewtonsoftJsonPkgVer>
-    <MoqPkgVer>[4.14.5,5.0)</MoqPkgVer>
-    <RabbitMQClientPkgVer>[6.1.0,7.0)</RabbitMQClientPkgVer>
-    <StackExchangeRedisPkgVer>[2.1.58,3.0)</StackExchangeRedisPkgVer>
-    <SwashbuckleAspNetCorePkgVer>[6.2.3]</SwashbuckleAspNetCorePkgVer>
-    <XUnitRunnerVisualStudioPkgVer>[2.4.3,3.0)</XUnitRunnerVisualStudioPkgVer>
-    <XUnitPkgVer>[2.4.1,3.0)</XUnitPkgVer>
   </PropertyGroup>
 
   <ItemGroup>
     <Service Include="{82A7F48D-3B50-4B1E-B82E-3ADA8210C358}" />
   </ItemGroup>
+
+  <!--
+    Note: Called (at the outer/cross-targeting level, with TargetFramework
+    cleared) by the aggregator .proj files' Test targets (see Tests.targets) to
+    work out which of this project's TFMs are actually available, so that
+    running the tests for a given framework across projects with mixed targets
+    (eg: dotnet build ./build/OpenTelemetry.proj -t:Test -p:TargetFramework=net472)
+    skips the projects which do not implement the requested target.
+  -->
+  <Target Name="GetTestProjectTargetFrameworks" Condition="'$(IsTestProject)' == 'true'" Returns="@(_TestProjectTargetFramework)">
+    <ItemGroup>
+      <_TestProjectTargetFramework Include="$(TargetFrameworks)" Condition="'$(TargetFrameworks)' != ''" />
+      <_TestProjectTargetFramework Include="$(TargetFramework)" Condition="'$(TargetFrameworks)' == ''" />
+    </ItemGroup>
+  </Target>
+
+  <Target Name="ResolveExposedExperimentalFeatures" BeforeTargets="CoreCompile">
+    <!-- Note: What this does is look for $(ProjectReferenceName).BuildFlags.txt
+        files for all the dependencies of the project being compiled. If
+        ExposeExperimentalFeatures=true is found in those files we set compiler
+        constants for each project where experimental features were exposed.
+        Example:
+        OPENTELEMETRY_EXPORTER_INMEMORY_EXPERIMENTAL_FEATURES_EXPOSED;OPENTELEMETRY_EXPERIMENTAL_FEATURES_EXPOSED;OPENTELEMETRY_API_EXPERIMENTAL_FEATURES_EXPOSED;OPENTELEMETRY_API_PROVIDERBUILDEREXTENSIONS_EXPERIMENTAL_FEATURES_EXPOSED
+        -->
+    <ItemGroup>
+      <DependenciesWithExposedExperimentalFeatures
+        Include="@(_ResolvedProjectReferencePaths->'%(Filename)')"
+        Condition="$([System.IO.File]::Exists('%(RootDir)%(Directory)%(Filename).BuildFlags.txt')) AND $([System.IO.File]::ReadAllText('%(RootDir)%(Directory)%(Filename).BuildFlags.txt').Contains('ExposeExperimentalFeatures=true'))" />
+      <CompilerConstantsForDependenciesWithExposedExperimentalFeatures Include="@(DependenciesWithExposedExperimentalFeatures->'$([System.String]::Copy('%(DependenciesWithExposedExperimentalFeatures.Identity)').ToUpper().Replace('.', '_'))_EXPERIMENTAL_FEATURES_EXPOSED')" />
+    </ItemGroup>
+
+    <PropertyGroup Condition="'@(CompilerConstantsForDependenciesWithExposedExperimentalFeatures)' != ''">
+      <DefineConstants>$(DefineConstants);@(CompilerConstantsForDependenciesWithExposedExperimentalFeatures)</DefineConstants>
+    </PropertyGroup>
+  </Target>
 </Project>

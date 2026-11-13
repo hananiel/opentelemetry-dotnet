@@ -1,83 +1,66 @@
-// <copyright file="RabbitMqHelper.cs" company="OpenTelemetry Authors">
 // Copyright The OpenTelemetry Authors
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//     http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
-// </copyright>
+// SPDX-License-Identifier: Apache-2.0
 
-using System;
 using System.Diagnostics;
 using RabbitMQ.Client;
 using RabbitMQ.Client.Events;
 
-namespace Utils.Messaging
+namespace Utils.Messaging;
+
+public static class RabbitMqHelper
 {
-    public static class RabbitMqHelper
+    public const string DefaultExchangeName = "";
+    public const string TestQueueName = "TestQueue";
+    public const string SendOperationName = "send";
+    public const string ProcessOperationName = "process";
+
+    private static readonly ConnectionFactory ConnectionFactory = new()
     {
-        public const string DefaultExchangeName = "";
-        public const string TestQueueName = "TestQueue";
+        HostName = Environment.GetEnvironmentVariable("RABBITMQ_HOSTNAME") ?? "localhost",
+        UserName = Environment.GetEnvironmentVariable("RABBITMQ_DEFAULT_USER") ?? "guest",
+        Password = Environment.GetEnvironmentVariable("RABBITMQ_DEFAULT_PASS") ?? "guest",
+        Port = 5672,
+        RequestedConnectionTimeout = TimeSpan.FromMilliseconds(3000),
+    };
 
-        private static readonly ConnectionFactory ConnectionFactory;
+    public static async Task<IConnection> CreateConnectionAsync() =>
+        await ConnectionFactory.CreateConnectionAsync().ConfigureAwait(false);
 
-        static RabbitMqHelper()
-        {
-            ConnectionFactory = new ConnectionFactory()
-            {
-                HostName = Environment.GetEnvironmentVariable("RABBITMQ_HOSTNAME") ?? "localhost",
-                UserName = Environment.GetEnvironmentVariable("RABBITMQ_DEFAULT_USER") ?? "guest",
-                Password = Environment.GetEnvironmentVariable("RABBITMQ_DEFAULT_PASS") ?? "guest",
-                Port = 5672,
-                RequestedConnectionTimeout = TimeSpan.FromMilliseconds(3000),
-            };
-        }
+    public static async Task<IChannel> CreateModelAndDeclareTestQueueAsync(IConnection connection)
+    {
+        ArgumentNullException.ThrowIfNull(connection);
 
-        public static IConnection CreateConnection()
-        {
-            return ConnectionFactory.CreateConnection();
-        }
+        var channel = await connection.CreateChannelAsync().ConfigureAwait(false);
 
-        public static IModel CreateModelAndDeclareTestQueue(IConnection connection)
-        {
-            var channel = connection.CreateModel();
+        await channel.QueueDeclareAsync(
+            queue: TestQueueName,
+            durable: false,
+            exclusive: false,
+            autoDelete: false,
+            arguments: null).ConfigureAwait(false);
 
-            channel.QueueDeclare(
-                queue: TestQueueName,
-                durable: false,
-                exclusive: false,
-                autoDelete: false,
-                arguments: null);
+        return channel;
+    }
 
-            return channel;
-        }
+    public static async Task StartConsumerAsync(IChannel channel, Func<BasicDeliverEventArgs, Task> processMessage)
+    {
+        var consumer = new AsyncEventingBasicConsumer(channel);
 
-        public static void StartConsumer(IModel channel, Action<BasicDeliverEventArgs> processMessage)
-        {
-            var consumer = new EventingBasicConsumer(channel);
+        consumer.ReceivedAsync += async (bc, ea) => await processMessage(ea).ConfigureAwait(false);
 
-            consumer.Received += (bc, ea) => processMessage(ea);
+        await channel.BasicConsumeAsync(queue: TestQueueName, autoAck: true, consumer: consumer).ConfigureAwait(false);
+    }
 
-            channel.BasicConsume(queue: TestQueueName, autoAck: true, consumer: consumer);
-        }
-
-        public static void AddMessagingTags(Activity activity)
-        {
-            // These tags are added demonstrating the semantic conventions of the OpenTelemetry messaging specification
-            // See:
-            //   * https://github.com/open-telemetry/opentelemetry-specification/blob/main/specification/trace/semantic_conventions/messaging.md#messaging-attributes
-            //   * https://github.com/open-telemetry/opentelemetry-specification/blob/main/specification/trace/semantic_conventions/messaging.md#rabbitmq
-            activity?.SetTag("messaging.system", "rabbitmq");
-            activity?.SetTag("messaging.destination_kind", "queue");
-            activity?.SetTag("messaging.destination", DefaultExchangeName);
-            activity?.SetTag("messaging.rabbitmq.routing_key", TestQueueName);
-        }
+    public static void AddMessagingTags(Activity? activity, string operationName)
+    {
+        // These tags are added demonstrating the semantic conventions of the OpenTelemetry messaging specification
+        // See:
+        //   * https://github.com/open-telemetry/semantic-conventions/blob/main/docs/messaging/messaging-spans.md#messaging-spans
+        //   * https://github.com/open-telemetry/semantic-conventions/blob/main/docs/messaging/rabbitmq.md
+        activity?.SetTag("messaging.system.name", "rabbitmq");
+        activity?.SetTag("messaging.operation.name", operationName);
+        activity?.SetTag("messaging.operation.type", operationName);
+        activity?.SetTag("messaging.destination.name", TestQueueName);
+        activity?.SetTag("rabbitmq.destination.routing_key", TestQueueName);
     }
 }

@@ -1,63 +1,52 @@
-// <copyright file="TelemetryHostedService.cs" company="OpenTelemetry Authors">
 // Copyright The OpenTelemetry Authors
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//     http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
-// </copyright>
+// SPDX-License-Identifier: Apache-2.0
 
-using System;
-using System.Threading;
-using System.Threading.Tasks;
-using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
-using OpenTelemetry.Metrics;
-using OpenTelemetry.Trace;
 
-namespace OpenTelemetry.Extensions.Hosting.Implementation
+// Warning: Do not change the namespace or class name in this file! Azure
+// Functions has taken a dependency on the specific details:
+// https://github.com/Azure/azure-functions-host/blob/d4655cc4fbb34fc14e6861731991118a9acd02ed/src/WebJobs.Script.WebHost/DependencyInjection/DependencyValidator/DependencyValidator.cs#L57
+
+namespace OpenTelemetry.Extensions.Hosting.Implementation;
+
+internal sealed class TelemetryHostedService(ITelemetryHostInitializer initializer) : IHostedLifecycleService
 {
-    internal class TelemetryHostedService : IHostedService
+    private bool initialized;
+
+    public Task StartingAsync(CancellationToken cancellationToken)
     {
-        private readonly IServiceProvider serviceProvider;
+        // Initialize as early as possible so that telemetry emitted by other
+        // services during IHostedLifecycleService.StartingAsync is captured.
+        this.Initialize();
+        return Task.CompletedTask;
+    }
 
-        public TelemetryHostedService(IServiceProvider serviceProvider)
+    public Task StartAsync(CancellationToken cancellationToken)
+    {
+        // Fallback for hosts which do not invoke the IHostedLifecycleService
+        // methods.
+        this.Initialize();
+        return Task.CompletedTask;
+    }
+
+    public Task StartedAsync(CancellationToken cancellationToken)
+        => Task.CompletedTask;
+
+    public Task StoppingAsync(CancellationToken cancellationToken)
+        => Task.CompletedTask;
+
+    public Task StopAsync(CancellationToken cancellationToken)
+        => Task.CompletedTask;
+
+    public Task StoppedAsync(CancellationToken cancellationToken)
+        => Task.CompletedTask;
+
+    private void Initialize()
+    {
+        if (!this.initialized)
         {
-            this.serviceProvider = serviceProvider;
-        }
-
-        public Task StartAsync(CancellationToken cancellationToken)
-        {
-            try
-            {
-                // The sole purpose of this HostedService is to ensure all
-                // instrumentations, exporters, etc., are created and started.
-                var meterProvider = this.serviceProvider.GetService<MeterProvider>();
-                var tracerProvider = this.serviceProvider.GetService<TracerProvider>();
-
-                if (meterProvider == null && tracerProvider == null)
-                {
-                    throw new InvalidOperationException("Could not resolve either MeterProvider or TracerProvider through application ServiceProvider, OpenTelemetry SDK has not been initialized.");
-                }
-            }
-            catch (Exception ex)
-            {
-                HostingExtensionsEventSource.Log.FailedOpenTelemetrySDK(ex);
-            }
-
-            return Task.CompletedTask;
-        }
-
-        public Task StopAsync(CancellationToken cancellationToken)
-        {
-            return Task.CompletedTask;
+            initializer.Initialize();
+            this.initialized = true;
         }
     }
 }

@@ -1,0 +1,103 @@
+// Copyright The OpenTelemetry Authors
+// SPDX-License-Identifier: Apache-2.0
+
+namespace OpenTelemetry.Logs.Tests;
+
+public sealed class LogRecordThreadStaticPoolTests
+{
+    [Fact]
+    public void RentReturnTests()
+    {
+        LogRecordThreadStaticPool.Storage = null;
+
+        var logRecord = LogRecordThreadStaticPool.Instance.Rent();
+        Assert.NotNull(logRecord);
+        Assert.Null(LogRecordThreadStaticPool.Storage);
+
+        LogRecordThreadStaticPool.Instance.Return(logRecord);
+        Assert.NotNull(LogRecordThreadStaticPool.Storage);
+        Assert.Equal(logRecord, LogRecordThreadStaticPool.Storage);
+
+        // Note: This record will be ignored because there is already something in the ThreadStatic storage.
+        LogRecordThreadStaticPool.Instance.Return(new() { Source = LogRecord.LogRecordSource.FromThreadStaticPool });
+        Assert.NotNull(LogRecordThreadStaticPool.Storage);
+        Assert.Equal(logRecord, LogRecordThreadStaticPool.Storage);
+
+        LogRecordThreadStaticPool.Storage = null;
+
+        var newLogRecord = new LogRecord() { Source = LogRecord.LogRecordSource.FromThreadStaticPool };
+        LogRecordThreadStaticPool.Instance.Return(newLogRecord);
+        Assert.NotNull(LogRecordThreadStaticPool.Storage);
+        Assert.Equal(newLogRecord, LogRecordThreadStaticPool.Storage);
+    }
+
+    [Fact]
+    public void ReturnReleasesLogContent()
+    {
+        LogRecordThreadStaticPool.Storage = null;
+
+        var logRecord = LogRecordThreadStaticPool.Instance.Rent();
+        logRecord.Body = "body";
+        logRecord.SeverityText = "severity";
+        logRecord.Data.EventName = "event";
+        logRecord.FormattedMessage = "message";
+        logRecord.TraceState = "key=value";
+        logRecord.Exception = new InvalidOperationException();
+        logRecord.Attributes = [new("key", new object())];
+        logRecord.ILoggerData.State = logRecord.Attributes;
+        logRecord.ILoggerData.BufferedScopes = [new object()];
+
+        LogRecordThreadStaticPool.Instance.Return(logRecord);
+
+        Assert.Same(logRecord, LogRecordThreadStaticPool.Storage);
+        Assert.Null(logRecord.Body);
+        Assert.Null(logRecord.SeverityText);
+        Assert.Null(logRecord.Data.EventName);
+        Assert.Null(logRecord.FormattedMessage);
+        Assert.Null(logRecord.TraceState);
+        Assert.Null(logRecord.Exception);
+        Assert.Null(logRecord.Attributes);
+        Assert.Null(logRecord.ILoggerData.State);
+        Assert.Null(logRecord.ILoggerData.BufferedScopes);
+    }
+
+    [Fact]
+    public void ClearTests()
+    {
+        var logRecord1 = LogRecordThreadStaticPool.Instance.Rent();
+        logRecord1.AttributeStorage =
+        [
+            with(16),
+            new("key1", "value1"),
+            new("key2", "value2"),
+        ];
+        logRecord1.ScopeStorage = [with(8), null, null];
+
+        LogRecordThreadStaticPool.Instance.Return(logRecord1);
+
+        Assert.Empty(logRecord1.AttributeStorage);
+        Assert.Equal(16, logRecord1.AttributeStorage.Capacity);
+        Assert.Empty(logRecord1.ScopeStorage);
+        Assert.Equal(8, logRecord1.ScopeStorage.Capacity);
+
+        logRecord1 = LogRecordThreadStaticPool.Instance.Rent();
+
+        Assert.NotNull(logRecord1.AttributeStorage);
+        Assert.NotNull(logRecord1.ScopeStorage);
+
+        for (var i = 0; i <= LogRecordPoolHelper.DefaultMaxNumberOfAttributes; i++)
+        {
+            logRecord1.AttributeStorage!.Add(new("key", "value"));
+        }
+
+        for (var i = 0; i <= LogRecordPoolHelper.DefaultMaxNumberOfScopes; i++)
+        {
+            logRecord1.ScopeStorage!.Add(null);
+        }
+
+        LogRecordThreadStaticPool.Instance.Return(logRecord1);
+
+        Assert.Null(logRecord1.AttributeStorage);
+        Assert.Null(logRecord1.ScopeStorage);
+    }
+}

@@ -28,12 +28,16 @@ versions [1.1.0, 2.0.0).
 
 Core components refer to the set of components which are required as per the
 spec. This includes API, SDK, and exporters which are required by the
-specification. These exporters are OTLP, Jaeger, Zipkin, Console and InMemory.
+specification. These exporters are OTLP, Zipkin (Deprecated), Console and InMemory.
 
 The core components are always versioned and released together. For example, if
-Zipkin exporter has a bug fix and is released as 1.0.1, then all other core
+Console exporter has a bug fix and is released as 1.0.1, then all other core
 components are also released as 1.0.1, even if there is no code change in other
 components.
+
+Starting with 1.4.0,
+[OpenTelemetry.Extensions.Hosting](./src/OpenTelemetry.Extensions.Hosting/README.md)
+will also be versioned and released together as a core component.
 
 ## Pre-releases
 
@@ -52,9 +56,9 @@ without corresponding changes here will result in build breaks - this helps
 catch any unintended changes to public API from being shipped accidentally. This
 also helps reviewers quickly understand if a given PR is proposing public API
 changes. For example,
-[this](https://github.com/open-telemetry/opentelemetry-dotnet/tree/master/src/OpenTelemetry.Instrumentation.AspNetCore/.publicApi)
+[this](https://github.com/open-telemetry/opentelemetry-dotnet/tree/master/src/OpenTelemetry.Exporter.OpenTelemetryProtocol/.publicApi)
 shows the public APIs, per target framework for the
-`OpenTelemetry.Instrumentation.AspNetCore` package.
+`OpenTelemetry.Exporter.OpenTelemetryProtocol` package.
 
 APIs which are released as part of stable packages will be listed in the
 "Shipped.txt" file, and those APIs which are released as part of
@@ -75,10 +79,7 @@ of separate packages.
 OpenTelemetry .NET relies on .NET runtime to provide several instrumentation
 APIs. Currently, `System.Diagnostics.DiagnosticSource` and
 `Microsoft.Extensions.Logging.Abstractions` are the packages from .NET runtime
-this repository is dependent on. In the future, APIs for Metrics, Propagators
-etc. will also come from .NET runtime itself. Depending on whether .NET runtime
-choses to use same package or separate package for these, users may be required
-to install separate packages for instrumenting.
+this repository is dependent on.
 
 ### Packaging non-stable signals
 

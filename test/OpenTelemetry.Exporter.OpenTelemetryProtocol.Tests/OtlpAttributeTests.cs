@@ -1,0 +1,905 @@
+// Copyright The OpenTelemetry Authors
+// SPDX-License-Identifier: Apache-2.0
+
+using System.Diagnostics.CodeAnalysis;
+using System.Globalization;
+using OpenTelemetry.Exporter.OpenTelemetryProtocol.Implementation.Serializer;
+using OpenTelemetry.Internal;
+using OtlpCommon = OpenTelemetry.Proto.Common.V1;
+
+namespace OpenTelemetry.Exporter.OpenTelemetryProtocol.Tests;
+
+public class OtlpAttributeTests
+{
+#if NET
+    private static readonly Dictionary<string, IFormattable> BoundedUtf8SpanFormattables = new()
+    {
+        [nameof(Half)] = Half.MinValue,
+        [nameof(DateOnly)] = DateOnly.MaxValue,
+        [nameof(System.Text.Rune)] = new System.Text.Rune(0x1F600), // 4-byte UTF-8 sequence (U+1F600)
+        ["nint"] = nint.MinValue,
+        ["nuint"] = nuint.MaxValue,
+        [nameof(System.Runtime.InteropServices.NFloat)] = System.Runtime.InteropServices.NFloat.MinValue,
+        [nameof(TimeOnly)] = TimeOnly.MaxValue,
+        [nameof(Int128)] = Int128.MinValue,
+        [nameof(UInt128)] = UInt128.MaxValue,
+        [nameof(System.Net.IPNetwork)] = System.Net.IPNetwork.Parse("ffff:ffff:ffff:ffff:ffff:ffff:ffff:ffff/128"),
+        [nameof(System.Numerics.Complex)] = new System.Numerics.Complex(double.MinValue, double.MinValue),
+    };
+
+    public static TheoryData<string> BoundedUtf8SpanFormattableValues() => [.. BoundedUtf8SpanFormattables.Keys];
+
+#endif
+
+    [Fact]
+    public void NullValueAttribute()
+    {
+        var kvp = new KeyValuePair<string, object?>("key", null);
+        Assert.True(TryTransformTag(kvp, out var attribute));
+        Assert.Equal(OtlpCommon.AnyValue.ValueOneofCase.None, attribute.Value.ValueCase);
+        Assert.False(attribute.Value.HasBoolValue);
+        Assert.False(attribute.Value.HasBytesValue);
+        Assert.False(attribute.Value.HasDoubleValue);
+        Assert.False(attribute.Value.HasIntValue);
+        Assert.False(attribute.Value.HasStringValue);
+    }
+
+    [Fact]
+    public void EmptyArrays()
+    {
+        var kvp = new KeyValuePair<string, object?>("key", Array.Empty<int>());
+        Assert.True(TryTransformTag(kvp, out var attribute));
+        Assert.Equal(OtlpCommon.AnyValue.ValueOneofCase.ArrayValue, attribute.Value.ValueCase);
+        Assert.Empty(attribute.Value.ArrayValue.Values);
+
+        kvp = new KeyValuePair<string, object?>("key", Array.Empty<object>());
+        Assert.True(TryTransformTag(kvp, out attribute));
+        Assert.Equal(OtlpCommon.AnyValue.ValueOneofCase.ArrayValue, attribute.Value.ValueCase);
+        Assert.Empty(attribute.Value.ArrayValue.Values);
+    }
+
+    [Theory]
+    [InlineData(sbyte.MaxValue)]
+    [InlineData(byte.MaxValue)]
+    [InlineData(short.MaxValue)]
+    [InlineData(ushort.MaxValue)]
+    [InlineData(int.MaxValue)]
+    [InlineData(uint.MaxValue)]
+    [InlineData(long.MaxValue)]
+    [InlineData(new sbyte[] { 1, 2, 3 })]
+    [InlineData(new byte[] { 1, 2, 3 })]
+    [InlineData(new short[] { 1, 2, 3 })]
+    [InlineData(new ushort[] { 1, 2, 3 })]
+    [InlineData(new int[] { 1, 2, 3 })]
+    [InlineData(new uint[] { 1, 2, 3 })]
+    [InlineData(new long[] { 1, 2, 3 })]
+    public void IntegralTypesSupported(object value)
+    {
+        var kvp = new KeyValuePair<string, object?>("key", value);
+        Assert.True(TryTransformTag(kvp, out var attribute));
+
+        switch (value)
+        {
+            case Array array:
+                if (value.GetType() == typeof(byte[]))
+                {
+                    Assert.Equal(OtlpCommon.AnyValue.ValueOneofCase.BytesValue, attribute.Value.ValueCase);
+                    Assert.Equal((byte[])value, attribute.Value.BytesValue.ToByteArray());
+                }
+                else
+                {
+                    Assert.Equal(OtlpCommon.AnyValue.ValueOneofCase.ArrayValue, attribute.Value.ValueCase);
+                    var expectedArray = new long[array.Length];
+                    for (var i = 0; i < array.Length; i++)
+                    {
+                        expectedArray[i] = Convert.ToInt64(array.GetValue(i), CultureInfo.InvariantCulture);
+                    }
+
+                    Assert.Equal(expectedArray, attribute.Value.ArrayValue.Values.Select(x => x.IntValue));
+                }
+
+                break;
+            default:
+                Assert.Equal(OtlpCommon.AnyValue.ValueOneofCase.IntValue, attribute.Value.ValueCase);
+                Assert.Equal(Convert.ToInt64(value, CultureInfo.InvariantCulture), attribute.Value.IntValue);
+                break;
+        }
+    }
+
+    [Theory]
+    [InlineData(float.MaxValue)]
+    [InlineData(double.MaxValue)]
+    [InlineData(new float[] { 1, 2, 3 })]
+    [InlineData(new double[] { 1, 2, 3 })]
+    public void FloatingPointTypesSupported(object value)
+    {
+        var kvp = new KeyValuePair<string, object?>("key", value);
+        Assert.True(TryTransformTag(kvp, out var attribute));
+
+        switch (value)
+        {
+            case Array array:
+                Assert.Equal(OtlpCommon.AnyValue.ValueOneofCase.ArrayValue, attribute.Value.ValueCase);
+                var expectedArray = new double[array.Length];
+                for (var i = 0; i < array.Length; i++)
+                {
+                    expectedArray[i] = Convert.ToDouble(array.GetValue(i), CultureInfo.InvariantCulture);
+                }
+
+                Assert.Equal(expectedArray, attribute.Value.ArrayValue.Values.Select(x => x.DoubleValue));
+                break;
+            default:
+                Assert.Equal(OtlpCommon.AnyValue.ValueOneofCase.DoubleValue, attribute.Value.ValueCase);
+                Assert.Equal(Convert.ToDouble(value, CultureInfo.InvariantCulture), attribute.Value.DoubleValue);
+                break;
+        }
+    }
+
+    [Theory]
+    [InlineData(true)]
+    [InlineData(new bool[] { true, false, true })]
+    public void BooleanTypeSupported(object value)
+    {
+        var kvp = new KeyValuePair<string, object?>("key", value);
+        Assert.True(TryTransformTag(kvp, out var attribute));
+
+        switch (value)
+        {
+            case Array array:
+                Assert.Equal(OtlpCommon.AnyValue.ValueOneofCase.ArrayValue, attribute.Value.ValueCase);
+                var expectedArray = new bool[array.Length];
+                for (var i = 0; i < array.Length; i++)
+                {
+                    expectedArray[i] = Convert.ToBoolean(array.GetValue(i), CultureInfo.InvariantCulture);
+                }
+
+                Assert.Equal(expectedArray, attribute.Value.ArrayValue.Values.Select(x => x.BoolValue));
+                break;
+            default:
+                Assert.Equal(OtlpCommon.AnyValue.ValueOneofCase.BoolValue, attribute.Value.ValueCase);
+                Assert.Equal(Convert.ToBoolean(value, CultureInfo.InvariantCulture), attribute.Value.BoolValue);
+                break;
+        }
+    }
+
+    [Theory]
+    [InlineData(char.MaxValue)]
+    [InlineData("string")]
+    [InlineData(ulong.MaxValue)]
+    public void StringTypesSupported(object value)
+    {
+        var kvp = new KeyValuePair<string, object?>("key", value);
+        Assert.True(TryTransformTag(kvp, out var attribute));
+        Assert.Equal(OtlpCommon.AnyValue.ValueOneofCase.StringValue, attribute.Value.ValueCase);
+        Assert.Equal(Convert.ToString(value, CultureInfo.InvariantCulture), attribute.Value.StringValue);
+    }
+
+    [Fact]
+    public void ObjectArrayTypesSupported()
+    {
+        var obj = new object();
+        var objectArray = new object?[] { null, "a", 'b', true, int.MaxValue, long.MaxValue, float.MaxValue, double.MaxValue, obj };
+
+        var kvp = new KeyValuePair<string, object?>("key", objectArray);
+
+        Assert.True(TryTransformTag(kvp, out var attribute));
+        Assert.Equal(OtlpCommon.AnyValue.ValueOneofCase.ArrayValue, attribute.Value.ValueCase);
+
+        Assert.Equal(OtlpCommon.AnyValue.ValueOneofCase.None, attribute.Value.ArrayValue.Values[0].ValueCase);
+
+        Assert.Equal(OtlpCommon.AnyValue.ValueOneofCase.StringValue, attribute.Value.ArrayValue.Values[1].ValueCase);
+        Assert.Equal("a", attribute.Value.ArrayValue.Values[1].StringValue);
+
+        Assert.Equal(OtlpCommon.AnyValue.ValueOneofCase.StringValue, attribute.Value.ArrayValue.Values[2].ValueCase);
+        Assert.Equal("b", attribute.Value.ArrayValue.Values[2].StringValue);
+
+        Assert.Equal(OtlpCommon.AnyValue.ValueOneofCase.BoolValue, attribute.Value.ArrayValue.Values[3].ValueCase);
+        Assert.True(attribute.Value.ArrayValue.Values[3].BoolValue);
+
+        Assert.Equal(OtlpCommon.AnyValue.ValueOneofCase.IntValue, attribute.Value.ArrayValue.Values[4].ValueCase);
+        Assert.Equal(int.MaxValue, attribute.Value.ArrayValue.Values[4].IntValue);
+
+        Assert.Equal(OtlpCommon.AnyValue.ValueOneofCase.IntValue, attribute.Value.ArrayValue.Values[5].ValueCase);
+        Assert.Equal(long.MaxValue, attribute.Value.ArrayValue.Values[5].IntValue);
+
+        Assert.Equal(OtlpCommon.AnyValue.ValueOneofCase.DoubleValue, attribute.Value.ArrayValue.Values[6].ValueCase);
+        Assert.Equal(float.MaxValue, attribute.Value.ArrayValue.Values[6].DoubleValue);
+
+        Assert.Equal(OtlpCommon.AnyValue.ValueOneofCase.DoubleValue, attribute.Value.ArrayValue.Values[7].ValueCase);
+        Assert.Equal(double.MaxValue, attribute.Value.ArrayValue.Values[7].DoubleValue);
+
+        Assert.Equal(OtlpCommon.AnyValue.ValueOneofCase.StringValue, attribute.Value.ArrayValue.Values[8].ValueCase);
+        Assert.Equal(obj.ToString(), attribute.Value.ArrayValue.Values[8].StringValue);
+    }
+
+    [Fact]
+    public void StringArrayTypesSupported()
+    {
+        var charArray = new char[] { 'a', 'b', 'c' };
+        var stringArray = new string?[] { "a", "b", "c", string.Empty, null };
+
+        var kvp = new KeyValuePair<string, object?>("key", charArray);
+        Assert.True(TryTransformTag(kvp, out var attribute));
+        Assert.Equal(OtlpCommon.AnyValue.ValueOneofCase.ArrayValue, attribute.Value.ValueCase);
+        Assert.Equal(charArray.Select(x => x.ToString()), attribute.Value.ArrayValue.Values.Select(x => x.StringValue));
+
+        kvp = new KeyValuePair<string, object?>("key", stringArray);
+        Assert.True(TryTransformTag(kvp, out attribute));
+        Assert.Equal(OtlpCommon.AnyValue.ValueOneofCase.ArrayValue, attribute.Value.ValueCase);
+
+        for (var i = 0; i < stringArray.Length; ++i)
+        {
+            var expectedValue = stringArray[i];
+            var expectedValueCase = expectedValue != null
+                ? OtlpCommon.AnyValue.ValueOneofCase.StringValue
+                : OtlpCommon.AnyValue.ValueOneofCase.None;
+
+            Assert.Equal(expectedValueCase, attribute.Value.ArrayValue.Values[i].ValueCase);
+            if (expectedValueCase != OtlpCommon.AnyValue.ValueOneofCase.None)
+            {
+                Assert.Equal(expectedValue, attribute.Value.ArrayValue.Values[i].StringValue);
+            }
+        }
+    }
+
+    [Fact]
+    public void ToStringIsCalledForAllOtherTypes()
+    {
+        var testValues = new object[]
+        {
+#if NET
+            nint.MaxValue,
+            nuint.MaxValue,
+#else
+            (nint)int.MaxValue,
+            (nuint)uint.MaxValue,
+#endif
+            decimal.MaxValue,
+            new(),
+        };
+
+        var testArrayValues = new object[]
+        {
+            new nint[] { 1, 2, 3 },
+            new nuint[] { 1, 2, 3 },
+            new decimal[] { 1, 2, 3 },
+            new object?[] { new object[3], new(), null },
+        };
+
+        foreach (var value in testValues)
+        {
+            var kvp = new KeyValuePair<string, object?>("key", value);
+            Assert.True(TryTransformTag(kvp, out var attribute));
+            Assert.Equal(OtlpCommon.AnyValue.ValueOneofCase.StringValue, attribute.Value.ValueCase);
+            Assert.Equal(value.ToString(), attribute.Value.StringValue);
+        }
+
+        foreach (var value in testArrayValues)
+        {
+            var kvp = new KeyValuePair<string, object?>("key", value);
+            Assert.True(TryTransformTag(kvp, out var attribute));
+            Assert.Equal(OtlpCommon.AnyValue.ValueOneofCase.ArrayValue, attribute.Value.ValueCase);
+
+            var array = value as Array;
+            Assert.NotNull(array);
+            for (var i = 0; i < attribute.Value.ArrayValue.Values.Count; ++i)
+            {
+                var expectedValue = array.GetValue(i)?.ToString();
+                var expectedValueCase = expectedValue != null
+                    ? OtlpCommon.AnyValue.ValueOneofCase.StringValue
+                    : OtlpCommon.AnyValue.ValueOneofCase.None;
+
+                Assert.Equal(expectedValueCase, attribute.Value.ArrayValue.Values[i].ValueCase);
+                if (expectedValueCase != OtlpCommon.AnyValue.ValueOneofCase.None)
+                {
+                    Assert.Equal(array.GetValue(i)!.ToString(), attribute.Value.ArrayValue.Values[i].StringValue);
+                }
+            }
+        }
+    }
+
+    [Theory]
+    [InlineData(4)]
+    [InlineData(100)]
+    public void ScalarSpanFormattableTypesRespectTagValueMaxLength(int tagValueMaxLength)
+    {
+        AssertTruncated(new DateTime(2024, 5, 6, 7, 8, 9, DateTimeKind.Utc), tagValueMaxLength);
+        AssertTruncated(new DateTimeOffset(2024, 5, 6, 7, 8, 9, TimeSpan.FromHours(2)), tagValueMaxLength);
+        AssertTruncated(TimeSpan.FromMilliseconds(123456.789), tagValueMaxLength);
+        AssertTruncated(Guid.NewGuid(), tagValueMaxLength);
+        AssertTruncated(12345.6789m, tagValueMaxLength);
+        AssertTruncated(ulong.MaxValue, tagValueMaxLength);
+
+        static void AssertTruncated<T>(T value, int tagValueMaxLength)
+            where T : notnull
+        {
+            var expected = Convert.ToString(value, CultureInfo.InvariantCulture)!;
+            var kvp = new KeyValuePair<string, object?>("key", value);
+
+            Assert.True(TryTransformTag(kvp, out var attribute, tagValueMaxLength));
+            Assert.Equal(OtlpCommon.AnyValue.ValueOneofCase.StringValue, attribute.Value.ValueCase);
+
+            var expectedValue = expected.Length > tagValueMaxLength
+                ? expected.Substring(0, tagValueMaxLength)
+                : expected;
+
+            Assert.Equal(expectedValue, attribute.Value.StringValue);
+        }
+    }
+
+    [Theory]
+    [InlineData(4, 3, 3)]
+    [InlineData(4, 4, 4)]
+    [InlineData(4, 5, 4)]
+    [InlineData(null, 5, 5)]
+    public void ByteArrayRespectsTagValueMaxLength(int? tagValueMaxLength, int byteCount, int expectedCount)
+    {
+        var bytes = Enumerable.Range(1, byteCount).Select(i => (byte)i).ToArray();
+        var kvp = new KeyValuePair<string, object?>("key", bytes);
+
+        Assert.True(TryTransformTag(kvp, out var attribute, tagValueMaxLength));
+        Assert.Equal(OtlpCommon.AnyValue.ValueOneofCase.BytesValue, attribute.Value.ValueCase);
+        Assert.Equal(bytes.Take(expectedCount).ToArray(), attribute.Value.BytesValue.ToByteArray());
+    }
+
+    [Fact]
+    public void ByteArrayNestedInKvListRespectsTagValueMaxLength()
+    {
+        var kvList = new List<KeyValuePair<string, object?>> { new("inner", new byte[] { 1, 2, 3, 4, 5 }) };
+        var kvp = new KeyValuePair<string, object?>("key", kvList);
+
+        Assert.True(TryTransformTag(kvp, out var attribute, 2));
+        var inner = Assert.Single(attribute.Value.KvlistValue.Values);
+        Assert.Equal([1, 2], inner.Value.BytesValue.ToByteArray());
+    }
+
+    [Fact]
+    public void ExceptionInToStringIsCaught()
+    {
+        var kvp = new KeyValuePair<string, object?>("key", new MyToStringMethodThrowsAnException());
+        Assert.False(TryTransformTag(kvp, out _));
+
+        kvp = new KeyValuePair<string, object?>("key", new object[] { 1, false, new MyToStringMethodThrowsAnException() });
+        Assert.False(TryTransformTag(kvp, out _));
+    }
+
+    [Fact]
+    public void BufferTooSmallForToStringValueIsNotCaught()
+    {
+        var otlpTagWriterState = new ProtobufOtlpTagWriter.OtlpTagWriterState
+        {
+            Buffer = new byte[16],
+            WritePosition = 0,
+        };
+
+        var value = new Uri("http://localhost/" + new string('a', 64));
+
+        Assert.Throws<ArgumentException>(() => ProtobufOtlpTagWriter.Instance.TryWriteTag(ref otlpTagWriterState, "key", value));
+    }
+
+    [Theory]
+    [InlineData(1)]
+    [InlineData(100)]
+    [InlineData(118)]
+    [InlineData(119)]
+    [InlineData(1000)]
+    [InlineData(20000)]
+    public void WriteKeyValue_RoundTripsWithAMinimalLengthPrefix(int valueLength)
+    {
+        // Around the point where the single reserved length byte stops being enough, so
+        // both the untouched and the shifted path are covered.
+        const string Key = "key";
+        var value = new string('v', valueLength);
+
+        var state = new ProtobufOtlpTagWriter.OtlpTagWriterState
+        {
+            Buffer = new byte[64 * 1024],
+            WritePosition = 0,
+        };
+
+        // Field 1 with wire type LEN, matching how attributes are written.
+        ProtobufOtlpTagWriter.WriteKeyValue(ref state, 1, Key, value);
+
+        // The message parses and carries the right content, whether or not the content
+        // had to be shifted to make room for a wider length prefix.
+        using var stream = new MemoryStream(state.Buffer, 0, state.WritePosition);
+        var field = OtlpCommon.KeyValue.Parser.ParseFrom(ReadLengthDelimitedField(stream));
+
+        Assert.Equal(Key, field.Key);
+        Assert.Equal(value, field.Value.StringValue);
+
+        // And the length prefix is minimal, which is the point of the change: the whole
+        // field is no longer than protobuf's own encoding of it.
+        Assert.Equal(state.WritePosition, 1 + ComputeVarIntSize((uint)field.CalculateSize()) + field.CalculateSize());
+
+        static byte[] ReadLengthDelimitedField(MemoryStream stream)
+        {
+            Assert.Equal(0x0A, stream.ReadByte()); // field 1, LEN
+
+            var length = 0;
+            var shift = 0;
+            while (true)
+            {
+                var b = stream.ReadByte();
+                Assert.True(b >= 0);
+                length |= (b & 0x7F) << shift;
+                if ((b & 0x80) == 0)
+                {
+                    break;
+                }
+
+                shift += 7;
+            }
+
+            var content = new byte[length];
+            Assert.Equal(length, stream.Read(content, 0, length));
+            return content;
+        }
+
+        static int ComputeVarIntSize(uint value)
+        {
+            var size = 1;
+            while (value >= 0x80)
+            {
+                size++;
+                value >>= 7;
+            }
+
+            return size;
+        }
+    }
+
+    [Fact]
+    public void DroppedTagWithOneByteRemainingRestoresPosition()
+    {
+        var state = new ProtobufOtlpTagWriter.OtlpTagWriterState
+        {
+            Buffer = new byte[16],
+            WritePosition = 15,
+        };
+
+        Assert.False(ProtobufOtlpTagWriter.WriteKeyValue(ref state, ProtobufOtlpTraceFieldNumberConstants.Span_Attributes, "key", new MyToStringMethodThrowsAnException()));
+
+        Assert.Equal(15, state.WritePosition);
+    }
+
+    [Theory]
+    [InlineData("scalar")]
+    [InlineData("array")]
+    [InlineData("kvlist")]
+    [InlineData("kvlistBeyondMaxDepth")]
+    public void OutOfMemoryExceptionInToStringIsNotSwallowed(string shape)
+    {
+        object value = shape switch
+        {
+            "scalar" => new MyToStringMethodThrowsOutOfMemory(),
+            "array" => new object[] { 1, new MyToStringMethodThrowsOutOfMemory() },
+            "kvlist" => new Dictionary<string, object?> { ["inner"] = new MyToStringMethodThrowsOutOfMemory() },
+            _ => NestBeyondMaxDepth(new KvListWhoseToStringThrowsOutOfMemory { new("x", "y") }),
+        };
+
+        var state = new ProtobufOtlpTagWriter.OtlpTagWriterState { Buffer = new byte[1024] };
+
+        Assert.Throws<OutOfMemoryException>(() => ProtobufOtlpTagWriter.WriteKeyValue(ref state, ProtobufOtlpTraceFieldNumberConstants.Span_Attributes, "key", value));
+
+        static object NestBeyondMaxDepth(object innermost)
+        {
+            for (var i = 0; i < TagWriter<object, object>.MaxRecursionDepth; i++)
+            {
+                innermost = new Dictionary<string, object?> { ["nested"] = innermost };
+            }
+
+            return innermost;
+        }
+    }
+
+#if NET
+    [Fact]
+    public void Utf8SpanFormattableIsWrittenAsString()
+    {
+        var value = "{\"name\":\"caf\u00E9 \U0001F600\"}";
+        var kvp = new KeyValuePair<string, object?>("key", new Utf8Value(value));
+
+        Assert.True(TryTransformTag(kvp, out var attribute));
+        Assert.Equal(OtlpCommon.AnyValue.ValueOneofCase.StringValue, attribute.Value.ValueCase);
+        Assert.Equal(value, attribute.Value.StringValue);
+    }
+
+    [Theory]
+    [MemberData(nameof(BoundedUtf8SpanFormattableValues))]
+    public void BoundedUtf8SpanFormattableIsWrittenWithSingleByteLengthPrefixes(string name)
+    {
+        var value = BoundedUtf8SpanFormattables[name];
+
+        var utf8 = System.Text.Encoding.UTF8.GetBytes(value.ToString(null, CultureInfo.InvariantCulture));
+        Assert.InRange(utf8.Length + 2, 0, 127);
+
+        byte[] expected =
+        [
+            0x0A, 3, (byte)'k', (byte)'e', (byte)'y', // KeyValue.key
+            0x12, (byte)(utf8.Length + 2), // KeyValue.value (AnyValue)
+            0x0A, (byte)utf8.Length, // AnyValue.string_value
+            .. utf8,
+        ];
+
+        var state = new ProtobufOtlpTagWriter.OtlpTagWriterState { Buffer = new byte[1024] };
+        Assert.True(ProtobufOtlpTagWriter.Instance.TryWriteTag(ref state, "key", value));
+
+        Assert.Equal(expected, state.Buffer.AsSpan(0, state.WritePosition).ToArray());
+    }
+
+    [Fact]
+    public void BigIntegerLongerThanASingleByteLengthIsWrittenAsString()
+    {
+        var value = System.Numerics.BigInteger.Pow(10, 200);
+
+        Assert.True(TryTransformTag(new KeyValuePair<string, object?>("key", value), out var attribute));
+        Assert.Equal(value.ToString(CultureInfo.InvariantCulture), attribute.Value.StringValue);
+    }
+
+    [Theory]
+    [InlineData(1, "a")]
+    [InlineData(2, "a")]
+    [InlineData(3, "a\U0001F600")]
+    [InlineData(100, "a\U0001F600b")]
+    public void StringTruncationDoesNotSplitASurrogatePair(int tagValueMaxLength, string expected)
+    {
+        const string Value = "a\U0001F600b";
+
+        Assert.True(TryTransformTag(new KeyValuePair<string, object?>("key", Value), out var attribute, tagValueMaxLength));
+        Assert.Equal(expected, attribute.Value.StringValue);
+
+        Assert.True(TryTransformTag(new KeyValuePair<string, object?>("key", new[] { Value }), out attribute, tagValueMaxLength));
+        Assert.Equal(expected, Assert.Single(attribute.Value.ArrayValue.Values).StringValue);
+    }
+
+    [Theory]
+    [InlineData(4)]
+    [InlineData(5)]
+    public void Utf8SpanFormattableIsTruncatedOnWholeCodePoints(int tagValueMaxLength)
+    {
+        var kvp = new KeyValuePair<string, object?>("key", new Utf8Value("a\u00E9\u20AC\U0001F600b"));
+
+        Assert.True(TryTransformTag(kvp, out var attribute, tagValueMaxLength));
+        Assert.Equal(tagValueMaxLength == 4 ? "a\u00E9\u20AC" : "a\u00E9\u20AC\U0001F600", attribute.Value.StringValue);
+    }
+
+    [Theory]
+    [InlineData(-1, null)]
+    [InlineData(-1, 10)]
+    [InlineData(1, null)]
+    [InlineData(1, 10)]
+    public void ByteCountOutsideTheTryFormatDestinationFallsBackToToString(int bytesPastDestination, int? tagValueMaxLength)
+    {
+        var kvp = new KeyValuePair<string, object?>("key", new Utf8ValueWithByteCountOutsideDestination(bytesPastDestination, "fallback"));
+
+        Assert.True(TryTransformTag(kvp, out var attribute, tagValueMaxLength));
+        Assert.Equal("fallback", attribute.Value.StringValue);
+    }
+
+    [Theory]
+    [InlineData(0, "")]
+    [InlineData(1, "a")]
+    [InlineData(2, "a\u00E9")]
+    [InlineData(3, "a\u00E9\u20AC")]
+    [InlineData(4, "a\u00E9\u20AC")]
+    [InlineData(5, "a\u00E9\u20AC\U0001F600")]
+    [InlineData(100, "a\u00E9\u20AC\U0001F600b")]
+    public void Utf8SpanFormattableRespectsTagValueMaxLengthInChars(int tagValueMaxLength, string expected)
+    {
+        var kvp = new KeyValuePair<string, object?>("key", new Utf8Value("a\u00E9\u20AC\U0001F600b"));
+
+        Assert.True(TryTransformTag(kvp, out var attribute, tagValueMaxLength));
+        Assert.Equal(expected, attribute.Value.StringValue);
+    }
+
+    [Theory]
+    [InlineData(null)]
+    [InlineData(100)]
+    public void Utf8SpanFormattableThatDoesNotFitThrowsSoTheBufferIsGrown(int? tagValueMaxLength)
+    {
+        var state = new ProtobufOtlpTagWriter.OtlpTagWriterState
+        {
+            Buffer = new byte[64],
+            WritePosition = 0,
+        };
+
+        var tag = new KeyValuePair<string, object?>("key", new Utf8Value(new string('v', 1024)));
+
+        Assert.Throws<ArgumentOutOfRangeException>(() => ProtobufOtlpTagWriter.Instance.TryWriteTag(ref state, tag, tagValueMaxLength));
+    }
+
+    [Fact]
+    public void ExceptionInUtf8ToStringFallbackIsCaught()
+    {
+        var kvp = new KeyValuePair<string, object?>("key", new Utf8ValueThatDoesNotFitAndThrowsInToString());
+        Assert.False(TryTransformTag(kvp, out _, tagValueMaxLength: 1));
+    }
+
+    [Fact]
+    public void NullUtf8ToStringFallbackIsDropped()
+    {
+        var kvp = new KeyValuePair<string, object?>("key", new Utf8ValueThatDoesNotFitAndReturnsNullFromToString());
+        Assert.False(TryTransformTag(kvp, out _, tagValueMaxLength: 1));
+    }
+
+    [Fact]
+    public void ExceptionInUtf8TryFormatIsCaught()
+    {
+        var kvp = new KeyValuePair<string, object?>("key", new Utf8ValueThatThrows(typeof(InvalidOperationException)));
+        Assert.False(TryTransformTag(kvp, out _));
+    }
+
+    [Theory]
+    [InlineData(typeof(ArgumentException))]
+    [InlineData(typeof(IndexOutOfRangeException))]
+    [InlineData(typeof(ArgumentOutOfRangeException))]
+    public void BufferFullExceptionInUtf8TryFormatThrowsSoTheBufferIsGrown(Type exceptionType)
+    {
+        var state = new ProtobufOtlpTagWriter.OtlpTagWriterState { Buffer = new byte[1024] };
+        var tag = new KeyValuePair<string, object?>("key", new Utf8ValueThatThrows(exceptionType));
+
+        Assert.Throws(exceptionType, () => ProtobufOtlpTagWriter.Instance.TryWriteTag(ref state, tag));
+    }
+
+    [Theory]
+    [InlineData(typeof(ArgumentException))]
+    [InlineData(typeof(IndexOutOfRangeException))]
+    public void BufferFullExceptionInUtf8TryFormatFallsBackToToStringWhenCapped(Type exceptionType)
+    {
+        var kvp = new KeyValuePair<string, object?>("key", new Utf8ValueThatThrows(exceptionType, "fallback"));
+
+        Assert.True(TryTransformTag(kvp, out var attribute, tagValueMaxLength: 10));
+        Assert.Equal("fallback", attribute.Value.StringValue);
+    }
+
+    [Fact]
+    public void KvListThatThrowsAfterAFormattedEntryIsRolledBack()
+    {
+        var state = new ProtobufOtlpTagWriter.OtlpTagWriterState
+        {
+            Buffer = new byte[1024],
+            WritePosition = 0,
+        };
+
+        Assert.False(ProtobufOtlpTagWriter.WriteKeyValue(ref state, ProtobufOtlpTraceFieldNumberConstants.Span_Attributes, "key", ThrowAfterFirstEntry()));
+
+        Assert.Equal(0, state.WritePosition);
+
+        static IEnumerable<KeyValuePair<string, object?>> ThrowAfterFirstEntry()
+        {
+            yield return new("inner", new Utf8Value("value"));
+            throw new InvalidOperationException("Nope.");
+        }
+    }
+
+    [Theory]
+    [InlineData(null)]
+    [InlineData(10)]
+    public void DroppedUtf8SpanFormattableIsRolledBack(int? tagValueMaxLength)
+    {
+        var state = new ProtobufOtlpTagWriter.OtlpTagWriterState
+        {
+            Buffer = new byte[1024],
+            WritePosition = 0,
+        };
+
+        Assert.False(ProtobufOtlpTagWriter.WriteKeyValue(ref state, ProtobufOtlpTraceFieldNumberConstants.Span_Attributes, "key", new Utf8ValueThatFillsBufferAndThrows(), tagValueMaxLength));
+
+        Assert.Equal(0, state.WritePosition);
+    }
+
+    [Fact]
+    public void Utf8SpanFormattableToStringFallbackIsWrittenLikeAString()
+    {
+        var expected = new ProtobufOtlpTagWriter.OtlpTagWriterState { Buffer = new byte[1024] };
+        Assert.True(ProtobufOtlpTagWriter.WriteKeyValue(ref expected, ProtobufOtlpTraceFieldNumberConstants.Span_Attributes, "key", "abcdefghij"));
+
+        var actual = new ProtobufOtlpTagWriter.OtlpTagWriterState { Buffer = new byte[1024] };
+        Assert.True(ProtobufOtlpTagWriter.WriteKeyValue(ref actual, ProtobufOtlpTraceFieldNumberConstants.Span_Attributes, "key", new Utf8ValueThatFillsBufferAndDoesNotFit("abcdefghijklmnop"), tagValueMaxLength: 10));
+
+        Assert.Equal(expected.Buffer.AsSpan(0, expected.WritePosition).ToArray(), actual.Buffer.AsSpan(0, actual.WritePosition).ToArray());
+    }
+
+    [Theory]
+    [InlineData(null)]
+    [InlineData(10)]
+    public void InvalidUtf8FromTryFormatFallsBackToToString(int? tagValueMaxLength)
+    {
+        foreach (var invalid in new byte[][] { [(byte)'c', (byte)'a', (byte)'f', 0xE9], [(byte)'a', 0xE2, 0x82] })
+        {
+            var kvp = new KeyValuePair<string, object?>("key", new Utf8Bytes(invalid, "fallback"));
+
+            Assert.True(TryTransformTag(kvp, out var attribute, tagValueMaxLength));
+            Assert.Equal("fallback", attribute.Value.StringValue);
+        }
+    }
+
+    [Theory]
+    [InlineData(null, 1024)]
+    [InlineData(10, 30)]
+    public void DirtyLengthCoversTheWholeTryFormatDestination(int? tagValueMaxLength, int expectedDestinationLength)
+    {
+        var state = new ProtobufOtlpTagWriter.OtlpTagWriterState { Buffer = new byte[1024] };
+
+        Assert.True(ProtobufOtlpTagWriter.WriteKeyValue(ref state, ProtobufOtlpTraceFieldNumberConstants.Span_Attributes, "key", new Utf8ValueThatUsesDestinationAsScratch("ok"), tagValueMaxLength));
+
+        var destinationStart = state.WritePosition - "ok".Length;
+        Assert.Equal(Math.Min(destinationStart + expectedDestinationLength, state.Buffer.Length), state.DirtyLength);
+        Assert.Equal((byte)'x', state.Buffer[state.DirtyLength - 1]);
+    }
+
+    [Fact]
+    public void DirtyLengthCoversADroppedTag()
+    {
+        var state = new ProtobufOtlpTagWriter.OtlpTagWriterState { Buffer = new byte[1024] };
+
+        Assert.False(ProtobufOtlpTagWriter.WriteKeyValue(ref state, ProtobufOtlpTraceFieldNumberConstants.Span_Attributes, "key", ThrowAfterLongEntry()));
+
+        Assert.Equal(0, state.WritePosition);
+        Assert.True(state.DirtyLength >= 100);
+
+        static IEnumerable<KeyValuePair<string, object?>> ThrowAfterLongEntry()
+        {
+            yield return new("inner", new string('v', 100));
+            throw new InvalidOperationException("Nope.");
+        }
+    }
+
+    [Fact]
+    public void Utf8SpanFormattableOverTheLengthLimitIsTruncatedWithoutGrowingTheBuffer()
+    {
+        var state = new ProtobufOtlpTagWriter.OtlpTagWriterState { Buffer = new byte[4096] };
+        var tag = new KeyValuePair<string, object?>("key", new Utf8Value(new string('v', 1024 * 1024)));
+
+        Assert.True(ProtobufOtlpTagWriter.Instance.TryWriteTag(ref state, tag, tagValueMaxLength: 10));
+
+        using var stream = new MemoryStream(state.Buffer, 0, state.WritePosition);
+        Assert.Equal(new string('v', 10), OtlpCommon.KeyValue.Parser.ParseFrom(stream).Value.StringValue);
+    }
+#endif
+
+    private static bool TryTransformTag(KeyValuePair<string, object?> tag, [NotNullWhen(true)] out OtlpCommon.KeyValue? attribute, int? tagValueMaxLength = null)
+    {
+        var otlpTagWriterState = new ProtobufOtlpTagWriter.OtlpTagWriterState
+        {
+            Buffer = new byte[1024],
+            WritePosition = 0,
+        };
+
+        if (ProtobufOtlpTagWriter.Instance.TryWriteTag(ref otlpTagWriterState, tag, tagValueMaxLength))
+        {
+            // Deserialize the ResourceSpans and validate the attributes.
+            using var stream = new MemoryStream(otlpTagWriterState.Buffer, 0, otlpTagWriterState.WritePosition);
+            var keyValue = OtlpCommon.KeyValue.Parser.ParseFrom(stream);
+
+            Assert.NotNull(keyValue);
+            attribute = keyValue;
+
+            return true;
+        }
+
+        attribute = null;
+        return false;
+    }
+
+#if NET
+    private sealed class Utf8Value(string value) : IUtf8SpanFormattable
+    {
+        public bool TryFormat(Span<byte> utf8Destination, out int bytesWritten, ReadOnlySpan<char> format, IFormatProvider? provider)
+            => System.Text.Encoding.UTF8.TryGetBytes(value, utf8Destination, out bytesWritten);
+
+        public override string ToString() => value;
+    }
+
+    /// <summary>
+    /// Reports success with a byte count past the end of the destination, or a negative one when
+    /// <paramref name="bytesPastDestination"/> is negative.
+    /// </summary>
+    private sealed class Utf8ValueWithByteCountOutsideDestination(int bytesPastDestination, string toStringValue) : IUtf8SpanFormattable
+    {
+        public bool TryFormat(Span<byte> utf8Destination, out int bytesWritten, ReadOnlySpan<char> format, IFormatProvider? provider)
+        {
+            bytesWritten = bytesPastDestination < 0 ? bytesPastDestination : utf8Destination.Length + bytesPastDestination;
+            return true;
+        }
+
+        public override string ToString() => toStringValue;
+    }
+
+    private sealed class Utf8Bytes(byte[] bytes, string toStringValue) : IUtf8SpanFormattable
+    {
+        public bool TryFormat(Span<byte> utf8Destination, out int bytesWritten, ReadOnlySpan<char> format, IFormatProvider? provider)
+        {
+            bytesWritten = bytes.Length;
+            return bytes.AsSpan().TryCopyTo(utf8Destination);
+        }
+
+        public override string ToString() => toStringValue;
+    }
+
+    private sealed class Utf8ValueThatThrows(Type exceptionType, string toStringValue = "") : IUtf8SpanFormattable
+    {
+        public bool TryFormat(Span<byte> utf8Destination, out int bytesWritten, ReadOnlySpan<char> format, IFormatProvider? provider)
+            => throw (Exception)Activator.CreateInstance(exceptionType, "Nope.")!;
+
+        public override string ToString() => toStringValue;
+    }
+
+    private sealed class Utf8ValueThatDoesNotFitAndThrowsInToString : IUtf8SpanFormattable
+    {
+        public bool TryFormat(Span<byte> utf8Destination, out int bytesWritten, ReadOnlySpan<char> format, IFormatProvider? provider)
+        {
+            bytesWritten = 0;
+            return false;
+        }
+
+        public override string ToString() => throw new InvalidOperationException("Nope.");
+    }
+
+    private sealed class Utf8ValueThatDoesNotFitAndReturnsNullFromToString : IUtf8SpanFormattable
+    {
+        public bool TryFormat(Span<byte> utf8Destination, out int bytesWritten, ReadOnlySpan<char> format, IFormatProvider? provider)
+        {
+            bytesWritten = 0;
+            return false;
+        }
+
+        public override string? ToString() => null;
+    }
+
+    private sealed class Utf8ValueThatFillsBufferAndThrows(Type? exceptionType = null) : IUtf8SpanFormattable
+    {
+        public bool TryFormat(Span<byte> utf8Destination, out int bytesWritten, ReadOnlySpan<char> format, IFormatProvider? provider)
+        {
+            utf8Destination.Fill((byte)'x');
+            throw (Exception)Activator.CreateInstance(exceptionType ?? typeof(InvalidOperationException), "Nope.")!;
+        }
+
+        public override string ToString() => "a";
+    }
+
+    private sealed class Utf8ValueThatUsesDestinationAsScratch(string value) : IUtf8SpanFormattable
+    {
+        public bool TryFormat(Span<byte> utf8Destination, out int bytesWritten, ReadOnlySpan<char> format, IFormatProvider? provider)
+        {
+            utf8Destination.Fill((byte)'x');
+            return System.Text.Encoding.UTF8.TryGetBytes(value, utf8Destination, out bytesWritten);
+        }
+
+        public override string ToString() => value;
+    }
+
+    private sealed class Utf8ValueThatFillsBufferAndDoesNotFit(string value) : IUtf8SpanFormattable
+    {
+        public bool TryFormat(Span<byte> utf8Destination, out int bytesWritten, ReadOnlySpan<char> format, IFormatProvider? provider)
+        {
+            utf8Destination.Fill((byte)'x');
+            bytesWritten = 0;
+            return false;
+        }
+
+        public override string ToString() => value;
+    }
+#endif
+
+    private sealed class MyToStringMethodThrowsAnException
+    {
+        public override string ToString()
+            => throw new InvalidOperationException("Nope.");
+    }
+
+#pragma warning disable CA2201 // Do not raise reserved exception types
+    private sealed class MyToStringMethodThrowsOutOfMemory
+    {
+        public override string ToString()
+            => throw new OutOfMemoryException();
+    }
+
+    private sealed class KvListWhoseToStringThrowsOutOfMemory : List<KeyValuePair<string, object?>>
+    {
+        public override string ToString()
+            => throw new OutOfMemoryException();
+    }
+#pragma warning restore CA2201 // Do not raise reserved exception types
+}

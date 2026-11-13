@@ -1,0 +1,510 @@
+// Copyright The OpenTelemetry Authors
+// SPDX-License-Identifier: Apache-2.0
+
+using System.Collections.Concurrent;
+using System.Diagnostics;
+using Microsoft.Extensions.Logging;
+using OpenTelemetry.Exporter;
+using OpenTelemetry.Tests;
+
+namespace OpenTelemetry.Logs.Tests;
+
+[Collection(LogRecordPoolCollectionDefinition.Name)]
+public sealed class LogRecordSharedPoolTests
+{
+    [Fact]
+    public void ResizeTests()
+    {
+        LogRecordSharedPool.Resize(LogRecordSharedPool.DefaultMaxPoolSize);
+        Assert.NotNull(LogRecordSharedPool.Current);
+        Assert.Equal(LogRecordSharedPool.DefaultMaxPoolSize, LogRecordSharedPool.Current.Capacity);
+
+        Assert.Throws<ArgumentOutOfRangeException>(() => LogRecordSharedPool.Resize(0));
+
+        var beforePool = LogRecordSharedPool.Current;
+
+        LogRecordSharedPool.Resize(1);
+
+        Assert.NotNull(LogRecordSharedPool.Current);
+        Assert.Equal(1, LogRecordSharedPool.Current.Capacity);
+        Assert.NotEqual(beforePool, LogRecordSharedPool.Current);
+    }
+
+    [Fact]
+    public void RentReturnTests()
+    {
+        LogRecordSharedPool.Resize(2);
+
+        var pool = LogRecordSharedPool.Current;
+
+        var logRecord1 = pool.Rent();
+        Assert.NotNull(logRecord1);
+
+        var logRecord2 = pool.Rent();
+        Assert.NotNull(logRecord1);
+
+        pool.Return(logRecord1);
+
+        Assert.Equal(1, pool.Count);
+
+        var logRecordWithReferencesAdded = pool.Rent();
+
+        // Note: This record won't be returned to the pool because we add a reference to it.
+        logRecordWithReferencesAdded.AddReference();
+
+        Assert.Equal(2, logRecordWithReferencesAdded.PoolReferenceCount);
+        pool.Return(logRecordWithReferencesAdded);
+
+        Assert.Equal(0, pool.Count);
+
+        pool.Return(logRecord2);
+
+        Assert.Equal(1, pool.Count);
+
+        logRecord1 = pool.Rent();
+        Assert.NotNull(logRecord1);
+        Assert.Equal(0, pool.Count);
+
+        logRecord2 = pool.Rent();
+        Assert.NotNull(logRecord2);
+        Assert.Equal(0, pool.Count);
+
+        var logRecord3 = pool.Rent();
+        var logRecord4 = pool.Rent();
+        Assert.NotNull(logRecord3);
+        Assert.NotNull(logRecord4);
+
+        pool.Return(logRecord1);
+        pool.Return(logRecord2);
+        pool.Return(logRecord3); // <- Discarded due to pool size of 2
+        pool.Return(logRecord4); // <- Discarded due to pool size of 2
+
+        Assert.Equal(2, pool.Count);
+    }
+
+    [Fact]
+    public void TrackReferenceTests()
+    {
+        LogRecordSharedPool.Resize(2);
+
+        var pool = LogRecordSharedPool.Current;
+
+        var logRecord1 = pool.Rent();
+        Assert.NotNull(logRecord1);
+
+        Assert.Equal(1, logRecord1.PoolReferenceCount);
+
+        logRecord1.AddReference();
+
+        Assert.Equal(2, logRecord1.PoolReferenceCount);
+
+        pool.Return(logRecord1);
+
+        Assert.Equal(1, logRecord1.PoolReferenceCount);
+
+        pool.Return(logRecord1);
+
+        Assert.Equal(1, pool.Count);
+        Assert.Equal(0, logRecord1.PoolReferenceCount);
+
+        pool.Return(logRecord1);
+
+        Assert.Equal(-1, logRecord1.PoolReferenceCount);
+        Assert.Equal(1, pool.Count); // Record was not returned because PoolReferences was negative.
+    }
+
+    [Fact]
+    public void ClearTests()
+    {
+        LogRecordSharedPool.Resize(LogRecordSharedPool.DefaultMaxPoolSize);
+
+        var pool = LogRecordSharedPool.Current;
+
+        var logRecord1 = pool.Rent();
+        logRecord1.AttributeStorage =
+        [
+            with(16),
+            new("key1", "value1"),
+            new("key2", "value2"),
+        ];
+        logRecord1.ScopeStorage = [with(8), null, null];
+
+        pool.Return(logRecord1);
+
+        Assert.Empty(logRecord1.AttributeStorage);
+        Assert.Equal(16, logRecord1.AttributeStorage.Capacity);
+        Assert.Empty(logRecord1.ScopeStorage);
+        Assert.Equal(8, logRecord1.ScopeStorage.Capacity);
+
+        logRecord1 = pool.Rent();
+
+        Assert.NotNull(logRecord1.AttributeStorage);
+        Assert.NotNull(logRecord1.ScopeStorage);
+
+        for (var i = 0; i <= LogRecordPoolHelper.DefaultMaxNumberOfAttributes; i++)
+        {
+            logRecord1.AttributeStorage!.Add(new KeyValuePair<string, object?>("key", "value"));
+        }
+
+        for (var i = 0; i <= LogRecordPoolHelper.DefaultMaxNumberOfScopes; i++)
+        {
+            logRecord1.ScopeStorage!.Add(null);
+        }
+
+        pool.Return(logRecord1);
+
+        Assert.Null(logRecord1.AttributeStorage);
+        Assert.Null(logRecord1.ScopeStorage);
+    }
+
+    [Theory]
+    [InlineData(1, 1)]
+    [InlineData(LogRecordPoolHelper.DefaultMaxNumberOfAttributes, LogRecordPoolHelper.DefaultMaxNumberOfScopes)]
+    [InlineData(LogRecordPoolHelper.DefaultMaxNumberOfAttributes + 1, LogRecordPoolHelper.DefaultMaxNumberOfScopes)]
+    [InlineData(LogRecordPoolHelper.DefaultMaxNumberOfAttributes, LogRecordPoolHelper.DefaultMaxNumberOfScopes + 1)]
+    [InlineData(LogRecordPoolHelper.DefaultMaxNumberOfAttributes + 1, LogRecordPoolHelper.DefaultMaxNumberOfScopes + 1)]
+    public void ExportedRecordReleasesLogContent(int numberOfAttributes, int numberOfScopes)
+    {
+        LogRecordSharedPool.Resize(LogRecordSharedPool.DefaultMaxPoolSize);
+        var pool = LogRecordSharedPool.Current;
+
+        List<KeyValuePair<string, object?>> state = [];
+        for (var i = 0; i < numberOfAttributes; i++)
+        {
+            state.Add(new("key", new object()));
+        }
+
+        // Keep the actual pooled record so cleanup can be checked before reuse.
+        List<LogRecord> exportedRecords = [];
+        using var exporter = new InMemoryExporter<LogRecord>(exportedRecords);
+        using var processor = new BatchLogRecordExportProcessor(exporter);
+        using var activity = new Activity("TestActivity");
+        activity.Start();
+        activity.TraceStateString = "key=value";
+
+        using (var loggerFactory = LoggerFactory.Create(builder => builder
+            .AddOpenTelemetry(options =>
+            {
+                options.IncludeFormattedMessage = true;
+                options.IncludeScopes = true;
+                options.IncludeTraceState = true;
+                options.AddProcessor(processor);
+            })))
+        {
+            var logger = loggerFactory.CreateLogger("TestLogger");
+            Stack<IDisposable?> scopes = new();
+            try
+            {
+                for (var i = 0; i < numberOfScopes; i++)
+                {
+                    scopes.Push(logger.BeginScope(new object()));
+                }
+
+                logger.Log(
+                    LogLevel.Error,
+                    new EventId(1, "TestEvent"),
+                    state,
+                    new InvalidOperationException(),
+                    (s, e) => "message");
+            }
+            finally
+            {
+                foreach (var scope in scopes)
+                {
+                    scope?.Dispose();
+                }
+            }
+
+            Assert.True(processor.Shutdown(10_000));
+        }
+
+        var logRecord = Assert.Single(exportedRecords);
+        Assert.Equal(1, pool.Count);
+        Assert.Equal(0, logRecord.PoolReferenceCount);
+        Assert.Null(logRecord.Body);
+        Assert.Null(logRecord.SeverityText);
+        Assert.Null(logRecord.FormattedMessage);
+        Assert.Null(logRecord.Exception);
+        Assert.Null(logRecord.TraceState);
+        Assert.Null(logRecord.EventId.Name);
+        Assert.Null(logRecord.Attributes);
+        Assert.Null(logRecord.ILoggerData.State);
+        Assert.Null(logRecord.ILoggerData.ScopeProvider);
+        Assert.Null(logRecord.ILoggerData.BufferedScopes);
+
+        if (numberOfAttributes > LogRecordPoolHelper.DefaultMaxNumberOfAttributes)
+        {
+            Assert.Null(logRecord.AttributeStorage);
+        }
+        else
+        {
+            Assert.NotNull(logRecord.AttributeStorage);
+            Assert.Empty(logRecord.AttributeStorage);
+        }
+
+        if (numberOfScopes > LogRecordPoolHelper.DefaultMaxNumberOfScopes)
+        {
+            Assert.Null(logRecord.ScopeStorage);
+        }
+        else
+        {
+            Assert.NotNull(logRecord.ScopeStorage);
+            Assert.Empty(logRecord.ScopeStorage);
+        }
+    }
+
+    [Fact]
+    public void ReturnPreservesLogContentWhileReferenced()
+    {
+        LogRecordSharedPool.Resize(LogRecordSharedPool.DefaultMaxPoolSize);
+        var pool = LogRecordSharedPool.Current;
+        var logRecord = pool.Rent();
+        logRecord.Body = "body";
+        logRecord.Exception = new InvalidOperationException();
+        logRecord.Attributes = [new("key", new object())];
+        logRecord.ILoggerData.State = logRecord.Attributes;
+        logRecord.AddReference();
+
+        pool.Return(logRecord);
+
+        Assert.Equal(0, pool.Count);
+        Assert.Equal("body", logRecord.Body);
+        Assert.NotNull(logRecord.Exception);
+        Assert.Single(logRecord.Attributes!);
+        Assert.Same(logRecord.Attributes, logRecord.ILoggerData.State);
+
+        pool.Return(logRecord);
+
+        Assert.Equal(1, pool.Count);
+        Assert.Null(logRecord.Body);
+        Assert.Null(logRecord.Exception);
+        Assert.Null(logRecord.Attributes);
+        Assert.Null(logRecord.ILoggerData.State);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task ExportTest(bool warmup)
+    {
+        LogRecordSharedPool.Resize(LogRecordSharedPool.DefaultMaxPoolSize);
+
+        var pool = LogRecordSharedPool.Current;
+
+        if (warmup)
+        {
+            for (var i = 0; i < LogRecordSharedPool.DefaultMaxPoolSize; i++)
+            {
+                pool.Return(new LogRecord { Source = LogRecord.LogRecordSource.FromSharedPool, PoolReferenceCount = 1 });
+            }
+
+            Assert.Equal(LogRecordSharedPool.DefaultMaxPoolSize, pool.Count);
+        }
+
+#pragma warning disable CA2000 // Dispose objects before losing scope
+        using BatchLogRecordExportProcessor processor = new(new NoopExporter());
+#pragma warning restore CA2000 // Dispose objects before losing scope
+
+        List<Task> tasks = [];
+
+        for (var i = 0; i < Environment.ProcessorCount; i++)
+        {
+            tasks.Add(Task.Run(
+                async () =>
+                {
+                    var random =
+#if NET
+                        Random.Shared;
+#else
+                        new Random();
+#endif
+
+#pragma warning disable CA5394 // Do not use insecure randomness
+                    await Task.Delay(random.Next(100, 150));
+#pragma warning restore CA5394 // Do not use insecure randomness
+
+                    for (var i = 0; i < 1000; i++)
+                    {
+                        var logRecord = pool.Rent();
+
+                        processor.OnEnd(logRecord);
+
+                        // This should no-op mostly.
+                        pool.Return(logRecord);
+
+#pragma warning disable CA5394 // Do not use insecure randomness
+                        await Task.Delay(random.Next(0, 20), TestContext.Current.CancellationToken);
+#pragma warning restore CA5394 // Do not use insecure randomness
+                    }
+                },
+                TestContext.Current.CancellationToken));
+        }
+
+        await Task.WhenAll(tasks);
+
+        Assert.True(processor.ForceFlush());
+
+        Assert.NotEqual(0, pool.Count);
+        Assert.True(pool.Count <= LogRecordSharedPool.DefaultMaxPoolSize, $"{pool.Count} > {LogRecordSharedPool.DefaultMaxPoolSize}");
+    }
+
+    [Fact]
+    public async Task DeadlockTest()
+    {
+        /*
+         * The way the LogRecordPool works is it maintains two counters one
+         * for readers and one for writers. The counters always increment
+         * and point to an index in the pool array by way of a modulus on
+         * the size of the array (index = counter % capacity). Under very
+         * heavy load it is possible for a reader to receive an index and
+         * then be yielded. When waking up that index may no longer be valid
+         * if other threads caused the counters to loop around. There is
+         * protection for this case in the pool, this test verifies it is
+         * working.
+         *
+         * This is considered a corner case. Many threads have to be renting
+         * & returning logs in a tight loop for this to happen. Real
+         * applications should be logging based on logic firing which should
+         * have more natural back-off time.
+         */
+
+        LogRecordSharedPool.Resize(LogRecordSharedPool.DefaultMaxPoolSize);
+
+        var pool = LogRecordSharedPool.Current;
+
+        List<Task> tasks = [];
+
+        for (var i = 0; i < Environment.ProcessorCount; i++)
+        {
+            tasks.Add(Task.Run(
+                async () =>
+                {
+                    await Task.Delay(2_000);
+
+                    for (var i = 0; i < 100_000; i++)
+                    {
+                        var logRecord = pool.Rent();
+
+                        pool.Return(logRecord);
+                    }
+                },
+                TestContext.Current.CancellationToken));
+        }
+
+        await Task.WhenAll(tasks);
+
+        Assert.True(pool.Count <= LogRecordSharedPool.DefaultMaxPoolSize, $"{pool.Count} > {LogRecordSharedPool.DefaultMaxPoolSize}");
+    }
+
+    /// <summary>
+    /// Regression test for https://github.com/open-telemetry/opentelemetry-dotnet/issues/6233
+    /// Verifies that Rent() never returns the same LogRecord instance to multiple threads concurrently.
+    /// </summary>
+    [Fact]
+    public async Task RentShouldNeverReturnSameInstanceConcurrently()
+    {
+        // Use a small pool to increase contention
+        LogRecordSharedPool.Resize(16);
+        var pool = LogRecordSharedPool.Current;
+
+        // Pre-warm the pool
+        for (var i = 0; i < 16; i++)
+        {
+            pool.Return(new LogRecord { Source = LogRecord.LogRecordSource.FromSharedPool, PoolReferenceCount = 1 });
+        }
+
+        var inUseRecords = new ConcurrentDictionary<LogRecord, int>();
+        var duplicateMessages = new ConcurrentQueue<string>();
+
+        var tasks = new List<Task>();
+        using var barrier = new Barrier(Environment.ProcessorCount);
+
+        for (var t = 0; t < Environment.ProcessorCount; t++)
+        {
+            tasks.Add(Task.Run(
+                () =>
+                {
+                    barrier.SignalAndWait(); // Synchronize start for maximum contention
+
+                    for (var i = 0; i < 10_000; i++)
+                    {
+                        var record = pool.Rent();
+
+                        // Check if this record is already in use by another thread
+                        if (!inUseRecords.TryAdd(record, Environment.CurrentManagedThreadId))
+                        {
+                            if (inUseRecords.TryGetValue(record, out var firstThreadId))
+                            {
+                                duplicateMessages.Enqueue(
+                                    $"LogRecord {record.GetHashCode()} rented by thread {firstThreadId} and {Environment.CurrentManagedThreadId}");
+                            }
+                            else
+                            {
+                                duplicateMessages.Enqueue(
+                                    $"LogRecord {record.GetHashCode()} duplicate rental detected by thread {Environment.CurrentManagedThreadId}");
+                            }
+                        }
+
+                        // Simulate some work
+                        Thread.SpinWait(10);
+
+                        // Remove from tracking before return
+                        inUseRecords.TryRemove(record, out _);
+                        pool.Return(record);
+                    }
+                },
+                TestContext.Current.CancellationToken));
+        }
+
+        await Task.WhenAll(tasks);
+
+        Assert.True(duplicateMessages.IsEmpty, string.Join(Environment.NewLine, duplicateMessages));
+    }
+
+    [Fact]
+    public void RecycledRecordWithNoScopesDoesNotBufferAnEmptyScopeList()
+    {
+        LogRecordSharedPool.Resize(LogRecordSharedPool.DefaultMaxPoolSize);
+
+        var pool = LogRecordSharedPool.Current;
+
+        var scopeProvider = new LoggerExternalScopeProvider();
+
+        var logRecord = pool.Rent();
+
+        using (scopeProvider.Push("scope"))
+        {
+            logRecord.ILoggerData.ScopeProvider = scopeProvider;
+            logRecord.Buffer();
+        }
+
+        var bufferedScopes = logRecord.ILoggerData.BufferedScopes;
+        Assert.NotNull(bufferedScopes);
+        Assert.Single(bufferedScopes);
+
+        pool.Return(logRecord);
+
+        // LogRecordPoolHelper.Clear keeps ScopeStorage and only clears it, so
+        // the recycled record comes back with a non-null but empty list.
+        Assert.NotNull(logRecord.ScopeStorage);
+        Assert.Empty(logRecord.ScopeStorage);
+
+        logRecord = pool.Rent();
+        logRecord.ILoggerData.BufferedScopes = null;
+        logRecord.ILoggerData.ScopeProvider = scopeProvider;
+
+        // No scopes are active this time.
+        logRecord.Buffer();
+
+        // Must stay null, so that Copy has no empty list to duplicate.
+        Assert.Null(logRecord.ILoggerData.BufferedScopes);
+
+        var copy = logRecord.Copy();
+        Assert.Null(copy.ILoggerData.BufferedScopes);
+    }
+
+    private sealed class NoopExporter : BaseExporter<LogRecord>
+    {
+        public override ExportResult Export(in Batch<LogRecord> batch) => ExportResult.Success;
+    }
+}

@@ -1,0 +1,102 @@
+// Copyright The OpenTelemetry Authors
+// SPDX-License-Identifier: Apache-2.0
+
+using OpenTelemetry.Internal;
+using YamlDotNet.RepresentationModel;
+
+namespace OpenTelemetry.Configuration.Declarative;
+
+/// <summary>
+/// Holds the YAML-specific state and services for one parse of a declarative configuration document.
+/// </summary>
+internal sealed class YamlParseContext
+{
+    private readonly Dictionary<YamlNode, ResolvedYamlScalar> resolved =
+        [with(YamlNodeReferenceEqualityComparer.Instance)];
+
+    private readonly Dictionary<YamlNode, IReadOnlyList<ResolvedYamlMappingEntry>> mappingKeys =
+        [with(YamlNodeReferenceEqualityComparer.Instance)];
+
+    private readonly Func<string, string?> resolveVariable;
+
+    private readonly YamlDocumentTrackingParser? documentTrackingParser;
+
+    /// <summary>
+    /// Initializes a new instance of the <see cref="YamlParseContext"/> class.
+    /// </summary>
+    /// <param name="resolveVariable">
+    /// Returns the value of a named environment variable, or <see langword="null"/> if not set.
+    /// </param>
+    /// <param name="documentTrackingParser">The parser that tracked alias-key positions, if available.</param>
+    internal YamlParseContext(
+        Func<string, string?> resolveVariable,
+        YamlDocumentTrackingParser? documentTrackingParser = null)
+    {
+        Guard.ThrowIfNull(resolveVariable);
+
+        this.documentTrackingParser = documentTrackingParser;
+
+        this.resolveVariable = name =>
+        {
+            var value = resolveVariable(name);
+            this.ReferencedEnvironmentVariables[name] = value;
+            return value;
+        };
+    }
+
+    /// <summary>
+    /// Gets the environment variables that substitution references in scalars resolved so far,
+    /// whether or not each reference has a default, mapped to the value each resolved to
+    /// (<see langword="null"/> if it was not set).
+    /// </summary>
+    internal Dictionary<string, string?> ReferencedEnvironmentVariables { get; } =
+        [with(OtelEnvironmentVariables.NameComparer)];
+
+    /// <summary>
+    /// Applies environment variable substitution and then YAML 1.2 core-schema resolution to
+    /// <paramref name="scalarNode"/>, returning the cached result on any later call for the same node.
+    /// </summary>
+    /// <param name="scalarNode">The scalar node.</param>
+    /// <returns>The resolved scalar.</returns>
+    /// <exception cref="DeclarativeConfigurationException">
+    /// Thrown when the scalar contains an invalid <c>${...}</c> reference, or when an explicit core
+    /// tag does not match the scalar's value.
+    /// </exception>
+    internal ResolvedYamlScalar ResolveScalar(YamlScalarNode scalarNode)
+    {
+        if (this.resolved.TryGetValue(scalarNode, out var existing))
+        {
+            return existing;
+        }
+
+        var value = YamlScalarResolver.Resolve(
+            scalarNode,
+            EnvironmentSubstitution.Substitute(scalarNode.Value ?? string.Empty, this.resolveVariable));
+
+        this.resolved.Add(scalarNode, value);
+        return value;
+    }
+
+    /// <summary>
+    /// Validates that <paramref name="mappingNode"/> has unique YAML string keys and returns them paired
+    /// with their value nodes and key positions, returning the memoized result on any later call for the same node.
+    /// </summary>
+    /// <param name="mappingNode">The mapping to validate.</param>
+    /// <param name="path">The path of <paramref name="mappingNode"/>, used in error messages.</param>
+    /// <returns>The resolved keys, value nodes, and key positions, in document order.</returns>
+    /// <exception cref="DeclarativeConfigurationException">
+    /// Thrown when a key is not a YAML string scalar, or when two keys resolve to the same string.
+    /// </exception>
+    internal IReadOnlyList<ResolvedYamlMappingEntry> ResolveMappingKeys(YamlMappingNode mappingNode, string path)
+    {
+        if (this.mappingKeys.TryGetValue(mappingNode, out var existing))
+        {
+            return existing;
+        }
+
+        var keys = mappingNode.EnsureUniqueStringKeys(path, this.documentTrackingParser);
+
+        this.mappingKeys.Add(mappingNode, keys);
+        return keys;
+    }
+}

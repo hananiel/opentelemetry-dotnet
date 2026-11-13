@@ -1,20 +1,11 @@
 <Project>
-  <Import Project="$([MSBuild]::GetDirectoryNameOfFileAbove($(MSBuildProjectDirectory), 'OpenTelemetry.sln'))\build\Common.nonprod.props" />
+  <Import Project="$([System.IO.Path]::Combine($(MSBuildThisFileDirectory), '..', 'Directory.Build.props'))" />
+  <Import Project="$([MSBuild]::GetDirectoryNameOfFileAbove($(MSBuildProjectDirectory), 'OpenTelemetry.slnx'))\build\Common.nonprod.props" />
 
   <PropertyGroup>
     <OutputType>Exe</OutputType>
-    <!-- https://dotnet.microsoft.com/download/dotnet-core -->
-    <!-- OmniSharp/VS Code requires TargetFrameworks to be in descending order for IntelliSense and analysis. -->
-    <TargetFrameworks>net6.0;net5.0;netcoreapp3.1</TargetFrameworks>
-    <!-- https://dotnet.microsoft.com/download/dotnet-framework -->
-    <TargetFrameworks Condition="$(OS) == 'Windows_NT'">$(TargetFrameworks);net461;net462;net47;net471;net472;net48</TargetFrameworks>
-  </PropertyGroup>
-
-  <PropertyGroup Label="Package versions used in this folder">
-    <!--
-      Please sort alphabetically.
-      Refer to https://docs.microsoft.com/nuget/concepts/package-versioning for semver syntax.
-    -->
-    <MicrosoftExtensionsLoggingPkgVer>[6.0.0,)</MicrosoftExtensionsLoggingPkgVer>
+    <TargetFrameworks>$(TargetFrameworksForDocs)</TargetFrameworks>
+    <!-- Opt-out of Artifacts Output for docs as there are duplicated project names -->
+    <UseArtifactsOutput>false</UseArtifactsOutput>
   </PropertyGroup>
 </Project>

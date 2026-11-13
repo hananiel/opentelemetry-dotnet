@@ -1,17 +1,23 @@
-﻿<Project Sdk="Microsoft.NET.Sdk">
+<Project Sdk="Microsoft.NET.Sdk">
+
   <PropertyGroup>
-    <!-- OmniSharp/VS Code requires TargetFrameworks to be in descending order for IntelliSense and analysis. -->
-    <TargetFrameworks>netstandard2.0</TargetFrameworks>
-    <Description>Startup extensions to register OpenTelemetry into the applications using Microsoft.Extensions.DependencyInjection and Microsoft.Extensions.Hosting</Description>
+    <TargetFrameworks>$(TargetFrameworksForLibraries)</TargetFrameworks>
+    <Description>Contains extensions to start OpenTelemetry in applications using Microsoft.Extensions.Hosting</Description>
     <RootNamespace>OpenTelemetry</RootNamespace>
+    <MinVerTagPrefix>core-</MinVerTagPrefix>
+    <SupportsBrowserAndMobilePlatforms>true</SupportsBrowserAndMobilePlatforms>
   </PropertyGroup>
 
   <ItemGroup>
-    <PackageReference Include="Microsoft.Extensions.Hosting.Abstractions" Version="$(MicrosoftExtensionsHostingAbstractionsPkgVer)" />
-    <ProjectReference Include="$(RepoRoot)\src\OpenTelemetry\OpenTelemetry.csproj" />
+    <PackageReference Include="Microsoft.Extensions.Hosting.Abstractions" />
+  </ItemGroup>
 
-    <Compile Include="$(RepoRoot)\src\OpenTelemetry.Api\Internal\ExceptionExtensions.cs" Link="Includes\ExceptionExtensions.cs" />
-    <Compile Include="$(RepoRoot)\src\OpenTelemetry.Api\Internal\Guard.cs" Link="Includes\Guard.cs" />
+  <ItemGroup>
+    <ProjectReference Include="$(RepoRoot)\src\OpenTelemetry\OpenTelemetry.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <InternalsVisibleTo Include="OpenTelemetry.Extensions.Hosting.Tests" PublicKey="$(StrongNamePublicKey)" />
   </ItemGroup>
 
 </Project>

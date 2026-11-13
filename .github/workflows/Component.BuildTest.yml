@@ -1,0 +1,141 @@
+# Called by ci.yml to build & test project files
+# See: https://docs.github.com/en/actions/using-workflows/reusing-workflows#creating-a-reusable-workflow
+name: Build Component
+
+on:
+  workflow_call:
+    inputs:
+      project-name:
+        required: true
+        type: string
+      project-build-commands:
+        default: ''
+        required: false
+        type: string
+      code-cov-name:
+        required: true
+        type: string
+      code-cov-prefix:
+        default: 'unittests'
+        required: false
+        type: string
+      os-list:
+        default: '[ "windows-2025", "windows-11-arm", "ubuntu-26.04", "ubuntu-26.04-arm" ]'
+        required: false
+        type: string
+      trigger:
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  build-test:
+    name: build-test
+
+    strategy:
+      fail-fast: ${{ inputs.trigger == 'merge_group' }}
+      matrix:
+        os: ${{ fromJSON(inputs.os-list) }}
+
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+
+    env:
+      DOTNET_DbgEnableMiniDump: 1
+      DOTNET_DbgMiniDumpType: 2
+      DOTNET_DbgMiniDumpName: ${{ github.workspace }}/TestResults/crash-%p.dmp
+      DOTNET_NOLOGO: true
+      DOTNET_SYSTEM_CONSOLE_ALLOW_ANSI_COLOR_REDIRECTION: 1
+      FORCE_COLOR: 3
+      NUGET_XMLDOC_MODE: skip
+      TERM: xterm
+      PROJECT_NAME: ${{ inputs.project-name }}
+      PROJECT_BUILD_COMMANDS: ${{ inputs.project-build-commands }}
+      # HACK Workaround for https://github.com/dotnet/runtime/issues/131636 - GCgen0size is a hex value: 4000000 = 64 MiB.
+      DOTNET_GCgen0size: ${{ matrix.os == 'windows-11-arm' && '4000000' || '' }}
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      with:
+        # Note: By default GitHub only fetches 1 commit. MinVer needs to find
+        # the version tag which is typically NOT on the first commit so we
+        # retrieve them all.
+        fetch-depth: 0
+        persist-credentials: false
+        show-progress: false
+
+    - name: Setup .NET
+      uses: actions/setup-dotnet@0f4a354dd5547a28c70b7853dbd95d5b67886e73 # v6.1.0
+      with:
+        global-json-file: global.json
+        dotnet-version: |
+          10.0.x
+
+    - name: dotnet restore ${{ inputs.project-name }}
+      shell: pwsh
+      run: dotnet restore ${env:PROJECT_NAME} ${env:PROJECT_BUILD_COMMANDS}
+
+    - name: dotnet build ${{ inputs.project-name }}
+      shell: pwsh
+      run: dotnet build ${env:PROJECT_NAME} --configuration Release --no-restore ${env:PROJECT_BUILD_COMMANDS}
+
+    - name: Increase inotify instance limit
+      if: runner.os == 'Linux'
+      shell: bash
+      run: sudo sysctl -w fs.inotify.max_user_instances=8192
+
+    - name: dotnet test ${{ inputs.project-name }}
+      shell: pwsh
+      timeout-minutes: 30
+      # Note: The Test target (see build/Tests.targets) runs `dotnet test` with
+      # the Microsoft.Testing.Platform runner for each test project, which runs
+      # the target frameworks of the project in parallel.
+      run: dotnet build ${env:PROJECT_NAME} -t:Test --no-restore -p:Configuration=Release ${env:PROJECT_BUILD_COMMANDS}
+
+    - name: Upload hang dumps and test platform logs
+      if: ${{ failure() || cancelled() }}
+      uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+      with:
+        if-no-files-found: ignore
+        name: hang-dumps-${{ inputs.code-cov-prefix }}-${{ inputs.code-cov-name }}-${{ matrix.os }}-attempt-${{ github.run_attempt }}
+        retention-days: 7
+        path: |
+          **/TestResults/**/*.log
+          **/TestResults/**/*.dmp
+          **/TestResults/**/Sequence_*.xml
+          **/TestResults/diag/*
+
+    - name: Upload code coverage ${{ inputs.code-cov-prefix }}-${{ inputs.code-cov-name }}
+      if: ${{ hashFiles('./TestResults/*/*/Cobertura-*.xml') != '' }}
+      uses: codecov/codecov-action@303a32d7a59b442fa8d48b6a1cc6825c09c847a5 # v7.1.1
+      continue-on-error: true # Note: Don't fail for upload failures
+      timeout-minutes: 5
+      env:
+        OS: ${{ matrix.os }}
+      with:
+        disable_search: true
+        disable_telem: true
+        env_vars: OS
+        files: TestResults/*/*/Cobertura-*.xml
+        flags: ${{ inputs.code-cov-prefix }}-${{ inputs.code-cov-name }}
+        name: Code Coverage for ${{ inputs.code-cov-prefix }}-${{ inputs.code-cov-name }} on [${{ matrix.os }}]
+        codecov_yml_path: .github/codecov.yml
+        token: ${{ secrets.CODECOV_TOKEN }}
+
+    - name: Upload test results ${{ inputs.code-cov-prefix }}-${{ inputs.code-cov-name }}
+      if: ${{ !cancelled() && hashFiles('./TestResults/*/*/junit-*.xml') != '' }}
+      uses: codecov/codecov-action@303a32d7a59b442fa8d48b6a1cc6825c09c847a5 # v7.1.1
+      continue-on-error: true # Note: Don't fail for upload failures
+      timeout-minutes: 5
+      with:
+        disable_search: true
+        disable_telem: true
+        env_vars: OS
+        files: TestResults/*/*/junit-*.xml
+        flags: ${{ inputs.code-cov-prefix }}-${{ inputs.code-cov-name }}
+        name: Test results for ${{ inputs.code-cov-prefix }}-${{ inputs.code-cov-name }} on [${{ matrix.os }}]
+        report_type: test_results
+        token: ${{ secrets.CODECOV_TOKEN }}

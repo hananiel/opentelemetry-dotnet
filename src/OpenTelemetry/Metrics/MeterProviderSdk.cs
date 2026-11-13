@@ -1,78 +1,119 @@
-// <copyright file="MeterProviderSdk.cs" company="OpenTelemetry Authors">
 // Copyright The OpenTelemetry Authors
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//     http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
-// </copyright>
+// SPDX-License-Identifier: Apache-2.0
 
-using System;
-using System.Collections.Generic;
+#if NET
+using System.Collections.Frozen;
+#endif
 using System.Diagnostics;
 using System.Diagnostics.Metrics;
-using System.Linq;
+using System.Diagnostics.Tracing;
 using System.Text;
+using System.Text.RegularExpressions;
+using Microsoft.Extensions.Configuration;
+using Microsoft.Extensions.DependencyInjection;
 using OpenTelemetry.Internal;
 using OpenTelemetry.Resources;
 
-namespace OpenTelemetry.Metrics
+namespace OpenTelemetry.Metrics;
+
+internal sealed class MeterProviderSdk : MeterProvider
 {
-    internal sealed class MeterProviderSdk : MeterProvider
+    internal const string ExemplarFilterConfigKey = "OTEL_METRICS_EXEMPLAR_FILTER";
+    internal const string ExemplarFilterHistogramsConfigKey = "OTEL_DOTNET_EXPERIMENTAL_METRICS_EXEMPLAR_FILTER_HISTOGRAMS";
+
+    // Observable callbacks execute synchronously under collectLock. Restore this
+    // after each pass so callbacks may collect a different provider on the same thread.
+    [ThreadStatic]
+    internal static long ObservableInstrumentsCollectionCycle;
+
+    internal readonly IServiceProvider ServiceProvider;
+    internal IDisposable? OwnedServiceProvider;
+    internal int ShutdownCount;
+    internal bool Disposed;
+    internal ExemplarFilterType? ExemplarFilter;
+    internal ExemplarFilterType? ExemplarFilterForHistograms;
+    internal Action? OnCollectObservableInstruments;
+
+    private static long lastObservableInstrumentsCollectionCycle;
+
+    private readonly List<Func<Instrument, MetricStreamConfiguration?>> viewConfigs;
+    private readonly Lock collectLock = new();
+    private readonly MeterListener listener;
+    private readonly Predicate<Instrument> shouldListenTo = static _ => false;
+    private CompositeMetricReader? compositeMetricReader;
+
+    private IDisposable? selfDiagnosticsRegistration;
+
+    internal MeterProviderSdk(
+        IServiceProvider serviceProvider,
+        bool ownsServiceProvider,
+        IDisposable selfDiagnosticsRegistration)
     {
-        internal int ShutdownCount;
-        private readonly List<object> instrumentations = new();
-        private readonly List<Func<Instrument, MetricStreamConfiguration>> viewConfigs;
-        private readonly object collectLock = new();
-        private readonly MeterListener listener;
-        private readonly MetricReader reader;
-        private readonly CompositeMetricReader compositeMetricReader;
-        private bool disposed;
+        this.selfDiagnosticsRegistration = selfDiagnosticsRegistration;
 
-        internal MeterProviderSdk(
-            Resource resource,
-            IEnumerable<string> meterSources,
-            List<MeterProviderBuilderBase.InstrumentationFactory> instrumentationFactories,
-            List<Func<Instrument, MetricStreamConfiguration>> viewConfigs,
-            int maxMetricStreams,
-            int maxMetricPointsPerMetricStream,
-            IEnumerable<MetricReader> readers)
+        var state = serviceProvider.GetRequiredService<MeterProviderBuilderSdk>();
+        state.RegisterProvider(this);
+
+        this.ServiceProvider = serviceProvider;
+
+        if (ownsServiceProvider)
         {
-            OpenTelemetrySdkEventSource.Log.MeterProviderSdkEvent("Building MeterProvider.");
+            this.OwnedServiceProvider = serviceProvider as IDisposable;
+            Debug.Assert(this.OwnedServiceProvider != null, "serviceProvider was not IDisposable");
+        }
 
-            StringBuilder exportersAdded = new StringBuilder();
-            StringBuilder instrumentationFactoriesAdded = new StringBuilder();
+        OpenTelemetrySdkEventSource.Log.MeterProviderSdkEvent("Building MeterProvider.");
 
-            this.Resource = resource;
-            this.viewConfigs = viewConfigs;
+        try
+        {
+            var configureProviderBuilders = serviceProvider.GetServices<IConfigureMeterProviderBuilder>();
+            foreach (var configureProviderBuilder in configureProviderBuilders)
+            {
+                configureProviderBuilder.ConfigureBuilder(serviceProvider, state);
+            }
 
-            foreach (var reader in readers)
+            this.ExemplarFilter = state.ExemplarFilter;
+
+            this.ApplySpecificationConfigurationKeys(serviceProvider.GetRequiredService<IConfiguration>());
+
+            var exportersAdded = new StringBuilder();
+            var instrumentationFactoriesAdded = new StringBuilder();
+
+            var resourceBuilder = state.ResourceBuilder ?? ResourceBuilder.CreateDefault();
+            resourceBuilder.ServiceProvider = serviceProvider;
+            this.Resource = resourceBuilder.Build();
+
+            this.viewConfigs = state.ViewConfigs;
+
+            OpenTelemetrySdkEventSource.Log.MeterProviderSdkEvent(
+                $"MeterProvider configuration: {{MetricLimit={state.MetricLimit}, CardinalityLimit={state.CardinalityLimit}, ExemplarFilter={this.ExemplarFilter}, ExemplarFilterForHistograms={this.ExemplarFilterForHistograms}}}.");
+
+            foreach (var reader in state.Readers)
             {
                 Guard.ThrowIfNull(reader);
 
                 reader.SetParentProvider(this);
-                reader.SetMaxMetricStreams(maxMetricStreams);
-                reader.SetMaxMetricPointsPerMetricStream(maxMetricPointsPerMetricStream);
 
-                if (this.reader == null)
+                reader.ApplyParentProviderSettings(
+                    state.MetricLimit,
+                    state.CardinalityLimit,
+                    this.ExemplarFilter,
+                    this.ExemplarFilterForHistograms);
+
+                if (this.Reader == null)
                 {
-                    this.reader = reader;
+                    this.Reader = reader;
                 }
-                else if (this.reader is CompositeMetricReader compositeReader)
+                else if (this.Reader is CompositeMetricReader compositeReader)
                 {
                     compositeReader.AddReader(reader);
                 }
                 else
                 {
-                    this.reader = new CompositeMetricReader(new[] { this.reader, reader });
+                    this.Reader = new CompositeMetricReader([this.Reader, reader]);
                 }
+
+                this.Reader.SetParentProvider(this);
 
                 if (reader is PeriodicExportingMetricReader periodicExportingMetricReader)
                 {
@@ -96,14 +137,18 @@ namespace OpenTelemetry.Metrics
                 OpenTelemetrySdkEventSource.Log.MeterProviderSdkEvent($"Exporters added = \"{exportersAdded}\".");
             }
 
-            this.compositeMetricReader = this.reader as CompositeMetricReader;
+            this.compositeMetricReader = this.Reader as CompositeMetricReader;
 
-            if (instrumentationFactories.Any())
+            if (state.Instrumentation.Count > 0)
             {
-                foreach (var instrumentationFactory in instrumentationFactories)
+                foreach (var instrumentation in state.Instrumentation)
                 {
-                    this.instrumentations.Add(instrumentationFactory.Factory());
-                    instrumentationFactoriesAdded.Append(instrumentationFactory.Name);
+                    if (instrumentation.Instance is not null)
+                    {
+                        this.Instrumentations.Add(instrumentation.Instance);
+                    }
+
+                    instrumentationFactoriesAdded.Append(instrumentation.Name);
                     instrumentationFactoriesAdded.Append(';');
                 }
             }
@@ -115,16 +160,11 @@ namespace OpenTelemetry.Metrics
             }
 
             // Setup Listener
-            Func<Instrument, bool> shouldListenTo = instrument => false;
-            if (meterSources.Any(s => WildcardHelper.ContainsWildcard(s)))
+            var meterSources = state.MeterSources;
+
+            if (CreateFilterPredicate(meterSources) is { } predicate)
             {
-                var regex = WildcardHelper.GetWildcardRegex(meterSources);
-                shouldListenTo = instrument => regex.IsMatch(instrument.Meter.Name);
-            }
-            else if (meterSources.Any())
-            {
-                var meterSourcesToSubscribe = new HashSet<string>(meterSources, StringComparer.OrdinalIgnoreCase);
-                shouldListenTo = instrument => meterSourcesToSubscribe.Contains(instrument.Meter.Name);
+                this.shouldListenTo = predicate;
             }
 
             OpenTelemetrySdkEventSource.Log.MeterProviderSdkEvent($"Listening to following meters = \"{string.Join(";", meterSources)}\".");
@@ -134,412 +174,591 @@ namespace OpenTelemetry.Metrics
 
             OpenTelemetrySdkEventSource.Log.MeterProviderSdkEvent($"Number of views configured = {viewConfigCount}.");
 
-            // We expect that all the readers to be added are provided before MeterProviderSdk is built.
-            // If there are no readers added, we do not enable measurements for the instruments.
-            if (viewConfigCount > 0)
+            this.listener.InstrumentPublished = (instrument, listener) =>
             {
-                this.listener.InstrumentPublished = (instrument, listener) =>
+                var state = this.InstrumentPublished(instrument, listeningIsManagedExternally: false);
+                if (state != null)
                 {
-                    if (!shouldListenTo(instrument))
-                    {
-                        OpenTelemetrySdkEventSource.Log.MetricInstrumentIgnored(instrument.Name, instrument.Meter.Name, "Instrument belongs to a Meter not subscribed by the provider.", "Use AddMeter to add the Meter to the provider.");
-                        return;
-                    }
+                    listener.EnableMeasurementEvents(instrument, state);
+                }
+            };
 
-                    try
-                    {
-                        OpenTelemetrySdkEventSource.Log.MeterProviderSdkEvent($"Started publishing Instrument = \"{instrument.Name}\" of Meter = \"{instrument.Meter.Name}\".");
+            // Everything double
+            this.listener.SetMeasurementEventCallback<double>(MeasurementRecordedDouble);
+            this.listener.SetMeasurementEventCallback<float>(static (instrument, value, tags, state) => MeasurementRecordedDouble(instrument, value, tags, state));
 
-                        // Creating list with initial capacity as the maximum
-                        // possible size, to avoid any array resize/copy internally.
-                        // There may be excess space wasted, but it'll eligible for
-                        // GC right after this method.
-                        var metricStreamConfigs = new List<MetricStreamConfiguration>(viewConfigCount);
-                        foreach (var viewConfig in this.viewConfigs)
-                        {
-                            var metricStreamConfig = viewConfig(instrument);
-                            if (metricStreamConfig != null)
-                            {
-                                metricStreamConfigs.Add(metricStreamConfig);
-                            }
-                        }
+            // Everything long
+            this.listener.SetMeasurementEventCallback<long>(MeasurementRecordedLong);
+            this.listener.SetMeasurementEventCallback<int>(static (instrument, value, tags, state) => MeasurementRecordedLong(instrument, value, tags, state));
+            this.listener.SetMeasurementEventCallback<short>(static (instrument, value, tags, state) => MeasurementRecordedLong(instrument, value, tags, state));
+            this.listener.SetMeasurementEventCallback<byte>(static (instrument, value, tags, state) => MeasurementRecordedLong(instrument, value, tags, state));
 
-                        if (metricStreamConfigs.Count == 0)
-                        {
-                            // No views matched. Add null
-                            // which will apply defaults.
-                            // Users can turn off this default
-                            // by adding a view like below as the last view.
-                            // .AddView(instrumentName: "*", MetricStreamConfiguration.Drop)
-                            metricStreamConfigs.Add(null);
-                        }
-
-                        if (this.reader != null)
-                        {
-                            if (this.compositeMetricReader == null)
-                            {
-                                var metrics = this.reader.AddMetricsListWithViews(instrument, metricStreamConfigs);
-                                if (metrics.Count > 0)
-                                {
-                                    listener.EnableMeasurementEvents(instrument, metrics);
-                                }
-                            }
-                            else
-                            {
-                                var metricsSuperList = this.compositeMetricReader.AddMetricsSuperListWithViews(instrument, metricStreamConfigs);
-                                if (metricsSuperList.Any(metrics => metrics.Count > 0))
-                                {
-                                    listener.EnableMeasurementEvents(instrument, metricsSuperList);
-                                }
-                            }
-                        }
-
-                        OpenTelemetrySdkEventSource.Log.MeterProviderSdkEvent($"Succeeded publishing Instrument = \"{instrument.Name}\" of Meter = \"{instrument.Meter.Name}\".");
-                    }
-                    catch (Exception)
-                    {
-                        OpenTelemetrySdkEventSource.Log.MetricInstrumentIgnored(instrument.Name, instrument.Meter.Name, "SDK internal error occurred.", "Contact SDK owners.");
-                    }
-                };
-
-                // Everything double
-                this.listener.SetMeasurementEventCallback<double>(this.MeasurementRecordedDouble);
-                this.listener.SetMeasurementEventCallback<float>((instrument, value, tags, state) => this.MeasurementRecordedDouble(instrument, value, tags, state));
-
-                // Everything long
-                this.listener.SetMeasurementEventCallback<long>(this.MeasurementRecordedLong);
-                this.listener.SetMeasurementEventCallback<int>((instrument, value, tags, state) => this.MeasurementRecordedLong(instrument, value, tags, state));
-                this.listener.SetMeasurementEventCallback<short>((instrument, value, tags, state) => this.MeasurementRecordedLong(instrument, value, tags, state));
-                this.listener.SetMeasurementEventCallback<byte>((instrument, value, tags, state) => this.MeasurementRecordedLong(instrument, value, tags, state));
-
-                this.listener.MeasurementsCompleted = (instrument, state) => this.MeasurementsCompleted(instrument, state);
-            }
-            else
-            {
-                this.listener.InstrumentPublished = (instrument, listener) =>
-                {
-                    if (!shouldListenTo(instrument))
-                    {
-                        OpenTelemetrySdkEventSource.Log.MetricInstrumentIgnored(instrument.Name, instrument.Meter.Name, "Instrument belongs to a Meter not subscribed by the provider.", "Use AddMeter to add the Meter to the provider.");
-                        return;
-                    }
-
-                    try
-                    {
-                        OpenTelemetrySdkEventSource.Log.MeterProviderSdkEvent($"Started publishing Instrument = \"{instrument.Name}\" of Meter = \"{instrument.Meter.Name}\".");
-
-                        if (!MeterProviderBuilderSdk.IsValidInstrumentName(instrument.Name))
-                        {
-                            OpenTelemetrySdkEventSource.Log.MetricInstrumentIgnored(
-                                instrument.Name,
-                                instrument.Meter.Name,
-                                "Instrument name is invalid.",
-                                "The name must comply with the OpenTelemetry specification");
-
-                            return;
-                        }
-
-                        if (this.reader != null)
-                        {
-                            if (this.compositeMetricReader == null)
-                            {
-                                var metric = this.reader.AddMetricWithNoViews(instrument);
-                                if (metric != null)
-                                {
-                                    listener.EnableMeasurementEvents(instrument, metric);
-                                }
-                            }
-                            else
-                            {
-                                var metrics = this.compositeMetricReader.AddMetricsWithNoViews(instrument);
-                                if (metrics.Any(metric => metric != null))
-                                {
-                                    listener.EnableMeasurementEvents(instrument, metrics);
-                                }
-                            }
-                        }
-
-                        OpenTelemetrySdkEventSource.Log.MeterProviderSdkEvent($"Succeeded publishing Instrument = \"{instrument.Name}\" of Meter = \"{instrument.Meter.Name}\".");
-                    }
-                    catch (Exception)
-                    {
-                        OpenTelemetrySdkEventSource.Log.MetricInstrumentIgnored(instrument.Name, instrument.Meter.Name, "SDK internal error occurred.", "Contact SDK owners.");
-                    }
-                };
-
-                // Everything double
-                this.listener.SetMeasurementEventCallback<double>(this.MeasurementRecordedDoubleSingleStream);
-                this.listener.SetMeasurementEventCallback<float>((instrument, value, tags, state) => this.MeasurementRecordedDoubleSingleStream(instrument, value, tags, state));
-
-                // Everything long
-                this.listener.SetMeasurementEventCallback<long>(this.MeasurementRecordedLongSingleStream);
-                this.listener.SetMeasurementEventCallback<int>((instrument, value, tags, state) => this.MeasurementRecordedLongSingleStream(instrument, value, tags, state));
-                this.listener.SetMeasurementEventCallback<short>((instrument, value, tags, state) => this.MeasurementRecordedLongSingleStream(instrument, value, tags, state));
-                this.listener.SetMeasurementEventCallback<byte>((instrument, value, tags, state) => this.MeasurementRecordedLongSingleStream(instrument, value, tags, state));
-
-                this.listener.MeasurementsCompleted = (instrument, state) => this.MeasurementsCompletedSingleStream(instrument, state);
-            }
+            this.listener.MeasurementsCompleted = MeasurementsCompleted;
 
             this.listener.Start();
 
             OpenTelemetrySdkEventSource.Log.MeterProviderSdkEvent("MeterProvider built successfully.");
         }
-
-        internal Resource Resource { get; }
-
-        internal List<object> Instrumentations => this.instrumentations;
-
-        internal MetricReader Reader => this.reader;
-
-        internal void MeasurementsCompletedSingleStream(Instrument instrument, object state)
+        catch (Exception)
         {
-            Debug.Assert(instrument != null, "instrument must be non-null.");
+            this.DisposeBuiltState(state);
+            throw;
+        }
+    }
 
-            if (this.compositeMetricReader == null)
-            {
-                if (state is not Metric metric)
-                {
-                    // TODO: log
-                    return;
-                }
+    internal Resource Resource { get; }
 
-                this.reader.CompleteSingleStreamMeasurement(metric);
-            }
-            else
-            {
-                if (state is not List<Metric> metrics)
-                {
-                    // TODO: log
-                    return;
-                }
+    internal List<object> Instrumentations { get; } = [];
 
-                this.compositeMetricReader.CompleteSingleStreamMeasurements(metrics);
-            }
+    internal MetricReader? Reader { get; private set; }
+
+    internal static void MeasurementsCompleted(Instrument instrument, object? state)
+    {
+        if (state is not MetricState metricState)
+        {
+            OpenTelemetrySdkEventSource.Log.MeasurementDropped(instrument?.Name ?? "UnknownInstrument", "SDK internal error occurred.", "Contact SDK owners.");
+            return;
         }
 
-        internal void MeasurementsCompleted(Instrument instrument, object state)
+        metricState.CompleteMeasurement();
+    }
+
+    internal static void MeasurementRecordedLong(Instrument instrument, long value, ReadOnlySpan<KeyValuePair<string, object?>> tags, object? state)
+    {
+        if (state is not MetricState metricState)
         {
-            Debug.Assert(instrument != null, "instrument must be non-null.");
-
-            if (this.compositeMetricReader == null)
-            {
-                if (state is not List<Metric> metrics)
-                {
-                    // TODO: log
-                    return;
-                }
-
-                this.reader.CompleteMeasurement(metrics);
-            }
-            else
-            {
-                if (state is not List<List<Metric>> metricsSuperList)
-                {
-                    // TODO: log
-                    return;
-                }
-
-                this.compositeMetricReader.CompleteMesaurements(metricsSuperList);
-            }
+            OpenTelemetrySdkEventSource.Log.MeasurementDropped(instrument?.Name ?? "UnknownInstrument", "SDK internal error occurred.", "Contact SDK owners.");
+            return;
         }
 
-        internal void MeasurementRecordedDouble(Instrument instrument, double value, ReadOnlySpan<KeyValuePair<string, object>> tagsRos, object state)
+        metricState.RecordMeasurementLong(value, tags);
+    }
+
+    internal static void MeasurementRecordedDouble(Instrument instrument, double value, ReadOnlySpan<KeyValuePair<string, object?>> tags, object? state)
+    {
+        if (state is not MetricState metricState)
         {
-            Debug.Assert(instrument != null, "instrument must be non-null.");
-
-            if (this.compositeMetricReader == null)
-            {
-                if (state is not List<Metric> metrics)
-                {
-                    OpenTelemetrySdkEventSource.Log.MeasurementDropped(instrument.Name, "SDK internal error occurred.", "Contact SDK owners.");
-                    return;
-                }
-
-                this.reader.RecordDoubleMeasurement(metrics, value, tagsRos);
-            }
-            else
-            {
-                if (state is not List<List<Metric>> metricsSuperList)
-                {
-                    OpenTelemetrySdkEventSource.Log.MeasurementDropped(instrument.Name, "SDK internal error occurred.", "Contact SDK owners.");
-                    return;
-                }
-
-                this.compositeMetricReader.RecordDoubleMeasurements(metricsSuperList, value, tagsRos);
-            }
+            OpenTelemetrySdkEventSource.Log.MeasurementDropped(instrument?.Name ?? "UnknownInstrument", "SDK internal error occurred.", "Contact SDK owners.");
+            return;
         }
 
-        internal void MeasurementRecordedLong(Instrument instrument, long value, ReadOnlySpan<KeyValuePair<string, object>> tagsRos, object state)
+        metricState.RecordMeasurementDouble(value, tags);
+    }
+
+    internal object? InstrumentPublished(Instrument instrument, bool listeningIsManagedExternally)
+    {
+        var listenToInstrumentUsingSdkConfiguration = this.shouldListenTo(instrument);
+
+        if (listeningIsManagedExternally && listenToInstrumentUsingSdkConfiguration)
         {
-            Debug.Assert(instrument != null, "instrument must be non-null.");
-
-            if (this.compositeMetricReader == null)
+            OpenTelemetrySdkEventSource.Log.MetricInstrumentIgnored(
+                instrument.Name,
+                instrument.Meter.Name,
+                "Instrument belongs to a Meter which has been enabled both externally and via a subscription on the provider. External subscription will be ignored in favor of the provider subscription.",
+                "Programmatic calls adding meters to the SDK (either by calling AddMeter directly or indirectly through helpers such as 'AddInstrumentation' extensions) are always favored over external registrations. When also using external management (typically IMetricsBuilder or IMetricsListener) remove programmatic calls to the SDK to allow registrations to be added and removed dynamically.");
+            return null;
+        }
+        else if (!listenToInstrumentUsingSdkConfiguration && !listeningIsManagedExternally)
+        {
+            // Note: The SDK always creates its self-observability instruments, but they are
+            // opt-in. Warning that they are ignored would be noise for users who never asked
+            // for them, so it is suppressed here.
+            if (!string.Equals(instrument.Meter.Name, SdkSelfObservability.MeterName, StringComparison.Ordinal))
             {
-                if (state is not List<Metric> metrics)
-                {
-                    OpenTelemetrySdkEventSource.Log.MeasurementDropped(instrument.Name, "SDK internal error occurred.", "Contact SDK owners.");
-                    return;
-                }
-
-                this.reader.RecordLongMeasurement(metrics, value, tagsRos);
+                OpenTelemetrySdkEventSource.Log.MetricInstrumentIgnored(
+                    instrument.Name,
+                    instrument.Meter.Name,
+                    "Instrument belongs to a Meter not subscribed by this provider. If another MeterProvider is configured to listen to this Meter, this warning can be ignored.",
+                    "Use AddMeter to add the Meter to the provider.");
             }
-            else
-            {
-                if (state is not List<List<Metric>> metricsSuperList)
-                {
-                    OpenTelemetrySdkEventSource.Log.MeasurementDropped(instrument.Name, "SDK internal error occurred.", "Contact SDK owners.");
-                    return;
-                }
 
-                this.compositeMetricReader.RecordLongMeasurements(metricsSuperList, value, tagsRos);
-            }
+            return null;
         }
 
-        internal void MeasurementRecordedLongSingleStream(Instrument instrument, long value, ReadOnlySpan<KeyValuePair<string, object>> tagsRos, object state)
+        object? state = null;
+        var viewConfigCount = this.viewConfigs.Count;
+
+        try
         {
-            Debug.Assert(instrument != null, "instrument must be non-null.");
-
-            if (this.compositeMetricReader == null)
+            if (OpenTelemetrySdkEventSource.Log.IsEnabled(EventLevel.Verbose, EventKeywords.All))
             {
-                if (state is not Metric metric)
-                {
-                    OpenTelemetrySdkEventSource.Log.MeasurementDropped(instrument.Name, "SDK internal error occurred.", "Contact SDK owners.");
-                    return;
-                }
-
-                this.reader.RecordSingleStreamLongMeasurement(metric, value, tagsRos);
+                OpenTelemetrySdkEventSource.Log.MeterProviderSdkEvent($"Started publishing Instrument = \"{instrument.Name}\" of Meter = \"{instrument.Meter.Name}\".");
             }
-            else
+
+            if (viewConfigCount <= 0)
             {
-                if (state is not List<Metric> metrics)
+                if (!MeterProviderBuilderSdk.IsValidInstrumentName(instrument.Name))
                 {
-                    OpenTelemetrySdkEventSource.Log.MeasurementDropped(instrument.Name, "SDK internal error occurred.", "Contact SDK owners.");
-                    return;
+                    OpenTelemetrySdkEventSource.Log.MetricInstrumentIgnored(
+                        instrument.Name,
+                        instrument.Meter.Name,
+                        "Instrument name is invalid.",
+                        "The name must comply with the OpenTelemetry specification");
+                    return null;
                 }
 
-                this.compositeMetricReader.RecordSingleStreamLongMeasurements(metrics, value, tagsRos);
-            }
-        }
-
-        internal void MeasurementRecordedDoubleSingleStream(Instrument instrument, double value, ReadOnlySpan<KeyValuePair<string, object>> tagsRos, object state)
-        {
-            Debug.Assert(instrument != null, "instrument must be non-null.");
-
-            if (this.compositeMetricReader == null)
-            {
-                if (state is not Metric metric)
+                if (this.Reader != null)
                 {
-                    OpenTelemetrySdkEventSource.Log.MeasurementDropped(instrument.Name, "SDK internal error occurred.", "Contact SDK owners.");
-                    return;
-                }
-
-                this.reader.RecordSingleStreamDoubleMeasurement(metric, value, tagsRos);
-            }
-            else
-            {
-                if (state is not List<Metric> metrics)
-                {
-                    OpenTelemetrySdkEventSource.Log.MeasurementDropped(instrument.Name, "SDK internal error occurred.", "Contact SDK owners.");
-                    return;
-                }
-
-                this.compositeMetricReader.RecordSingleStreamDoubleMeasurements(metrics, value, tagsRos);
-            }
-        }
-
-        internal void CollectObservableInstruments()
-        {
-            lock (this.collectLock)
-            {
-                // Record all observable instruments
-                try
-                {
-                    this.listener.RecordObservableInstruments();
-                }
-                catch (Exception exception)
-                {
-                    // TODO:
-                    // It doesn't looks like we can find which instrument callback
-                    // threw.
-                    OpenTelemetrySdkEventSource.Log.MetricObserverCallbackException(exception);
-                }
-            }
-        }
-
-        /// <summary>
-        /// Called by <c>ForceFlush</c>. This function should block the current
-        /// thread until flush completed or timed out.
-        /// </summary>
-        /// <param name="timeoutMilliseconds">
-        /// The number (non-negative) of milliseconds to wait, or
-        /// <c>Timeout.Infinite</c> to wait indefinitely.
-        /// </param>
-        /// <returns>
-        /// Returns <c>true</c> when flush succeeded; otherwise, <c>false</c>.
-        /// </returns>
-        /// <remarks>
-        /// This function is called synchronously on the thread which made the
-        /// first call to <c>ForceFlush</c>. This function should not throw
-        /// exceptions.
-        /// </remarks>
-        internal bool OnForceFlush(int timeoutMilliseconds)
-        {
-            OpenTelemetrySdkEventSource.Log.MeterProviderSdkEvent($"{nameof(MeterProviderSdk)}.{nameof(this.OnForceFlush)} called with {nameof(timeoutMilliseconds)} = {timeoutMilliseconds}.");
-            return this.reader?.Collect(timeoutMilliseconds) ?? true;
-        }
-
-        /// <summary>
-        /// Called by <c>Shutdown</c>. This function should block the current
-        /// thread until shutdown completed or timed out.
-        /// </summary>
-        /// <param name="timeoutMilliseconds">
-        /// The number (non-negative) of milliseconds to wait, or
-        /// <c>Timeout.Infinite</c> to wait indefinitely.
-        /// </param>
-        /// <returns>
-        /// Returns <c>true</c> when shutdown succeeded; otherwise, <c>false</c>.
-        /// </returns>
-        /// <remarks>
-        /// This function is called synchronously on the thread which made the
-        /// first call to <c>Shutdown</c>. This function should not throw
-        /// exceptions.
-        /// </remarks>
-        internal bool OnShutdown(int timeoutMilliseconds)
-        {
-            OpenTelemetrySdkEventSource.Log.MeterProviderSdkEvent($"{nameof(MeterProviderSdk)}.{nameof(this.OnShutdown)} called with {nameof(timeoutMilliseconds)} = {timeoutMilliseconds}.");
-            return this.reader?.Shutdown(timeoutMilliseconds) ?? true;
-        }
-
-        protected override void Dispose(bool disposing)
-        {
-            OpenTelemetrySdkEventSource.Log.MeterProviderSdkEvent($"{nameof(MeterProviderSdk)}.{nameof(this.Dispose)} started.");
-            if (!this.disposed)
-            {
-                if (disposing)
-                {
-                    if (this.instrumentations != null)
+                    var metrics = this.Reader.AddMetricWithNoViews(instrument);
+                    if (metrics.Count == 1)
                     {
-                        foreach (var item in this.instrumentations)
+                        state = MetricState.BuildForSingleMetric(metrics[0]);
+                    }
+                    else if (metrics.Count > 0)
+                    {
+                        state = MetricState.BuildForMetricList(metrics);
+                    }
+                }
+            }
+            else
+            {
+                // Creating list with initial capacity as the maximum
+                // possible size, to avoid any array resize/copy internally.
+                // There may be excess space wasted, but it'll eligible for
+                // GC right after this method.
+                var metricStreamConfigs = new List<MetricStreamConfiguration?>(viewConfigCount);
+                for (var i = 0; i < viewConfigCount; ++i)
+                {
+                    var viewConfig = this.viewConfigs[i];
+                    MetricStreamConfiguration? metricStreamConfig = null;
+
+                    try
+                    {
+                        metricStreamConfig = viewConfig(instrument);
+
+                        // The SDK provides some static MetricStreamConfigurations.
+                        // For example, the Drop configuration. The static ViewId
+                        // should not be changed for these configurations.
+                        if (metricStreamConfig != null && !metricStreamConfig.ViewId.HasValue)
                         {
-                            (item as IDisposable)?.Dispose();
+                            metricStreamConfig.ViewId = i;
                         }
 
-                        this.instrumentations.Clear();
+                        if (metricStreamConfig is HistogramConfiguration
+                            && instrument.GetType().GetGenericTypeDefinition() != typeof(Histogram<>))
+                        {
+                            metricStreamConfig = null;
+
+                            OpenTelemetrySdkEventSource.Log.MetricViewIgnored(
+                                instrument.Name,
+                                instrument.Meter.Name,
+                                "The current SDK does not allow aggregating non-Histogram instruments as Histograms.",
+                                "Fix the view configuration.");
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        OpenTelemetrySdkEventSource.Log.MetricViewIgnored(instrument.Name, instrument.Meter.Name, ex.Message, "Fix the view configuration.");
                     }
 
-                    // Wait for up to 5 seconds grace period
-                    this.reader?.Shutdown(5000);
-                    this.reader?.Dispose();
-                    this.compositeMetricReader?.Dispose();
+                    if (metricStreamConfig != null)
+                    {
+                        try
+                        {
+                            metricStreamConfig.Validate();
+                        }
+                        catch (Exception ex)
+                        {
+                            OpenTelemetrySdkEventSource.Log.MetricViewIgnored(instrument.Name, instrument.Meter.Name, ex.Message, "Fix the view configuration.");
+                            metricStreamConfig = null;
+                        }
+                    }
 
-                    this.listener.Dispose();
+                    if (metricStreamConfig != null)
+                    {
+                        metricStreamConfigs.Add(metricStreamConfig);
+                    }
                 }
 
-                this.disposed = true;
-                OpenTelemetrySdkEventSource.Log.ProviderDisposed(nameof(MeterProvider));
+                if (metricStreamConfigs.Count == 0)
+                {
+                    // No views matched. Add null
+                    // which will apply defaults.
+                    // Users can turn off this default
+                    // by adding a view like below as the last view.
+                    // .AddView(instrumentName: "*", MetricStreamConfiguration.Drop)
+                    metricStreamConfigs.Add(null);
+                }
+
+                if (this.Reader != null)
+                {
+                    var metrics = this.Reader.AddMetricWithViews(instrument, metricStreamConfigs);
+                    if (metrics.Count == 1)
+                    {
+                        state = MetricState.BuildForSingleMetric(metrics[0]);
+                    }
+                    else if (metrics.Count > 0)
+                    {
+                        state = MetricState.BuildForMetricList(metrics);
+                    }
+                }
             }
 
-            base.Dispose(disposing);
+            if (state != null)
+            {
+                if (OpenTelemetrySdkEventSource.Log.IsEnabled(EventLevel.Verbose, EventKeywords.All))
+                {
+                    OpenTelemetrySdkEventSource.Log.MeterProviderSdkEvent($"Measurements for Instrument = \"{instrument.Name}\" of Meter = \"{instrument.Meter.Name}\" will be processed and aggregated by the SDK.");
+                }
+
+                return state;
+            }
+            else
+            {
+                if (OpenTelemetrySdkEventSource.Log.IsEnabled(EventLevel.Verbose, EventKeywords.All))
+                {
+                    OpenTelemetrySdkEventSource.Log.MeterProviderSdkEvent($"Measurements for Instrument = \"{instrument.Name}\" of Meter = \"{instrument.Meter.Name}\" will be dropped by the SDK.");
+                }
+
+                return null;
+            }
         }
+#if DEBUG
+        catch (Exception ex)
+        {
+            throw new InvalidOperationException("SDK internal error occurred.", ex);
+        }
+#else
+        catch (Exception)
+        {
+            OpenTelemetrySdkEventSource.Log.MetricInstrumentIgnored(instrument.Name, instrument.Meter.Name, "SDK internal error occurred.", "Contact SDK owners.");
+            return null;
+        }
+#endif
+    }
+
+    internal void CollectObservableInstruments()
+    {
+        lock (this.collectLock)
+        {
+            var previousCollectionCycle = ObservableInstrumentsCollectionCycle;
+            ObservableInstrumentsCollectionCycle = Interlocked.Increment(ref lastObservableInstrumentsCollectionCycle);
+
+            // Record all observable instruments
+            try
+            {
+                this.listener.RecordObservableInstruments();
+
+                this.OnCollectObservableInstruments?.Invoke();
+            }
+            catch (Exception exception)
+            {
+                // TODO:
+                // It doesn't looks like we can find which instrument callback
+                // threw.
+                OpenTelemetrySdkEventSource.Log.MetricObserverCallbackException(exception);
+            }
+            finally
+            {
+                ObservableInstrumentsCollectionCycle = previousCollectionCycle;
+            }
+        }
+    }
+
+    /// <summary>
+    /// Called by <c>ForceFlush</c>. This function should block the current
+    /// thread until flush completed or timed out.
+    /// </summary>
+    /// <param name="timeoutMilliseconds">
+    /// The number (non-negative) of milliseconds to wait, or
+    /// <c>Timeout.Infinite</c> to wait indefinitely.
+    /// </param>
+    /// <returns>
+    /// Returns <c>true</c> when flush succeeded; otherwise, <c>false</c>.
+    /// </returns>
+    /// <remarks>
+    /// This function is called synchronously on the thread which made the
+    /// first call to <c>ForceFlush</c>. This function should not throw
+    /// exceptions.
+    /// </remarks>
+    internal bool OnForceFlush(int timeoutMilliseconds)
+    {
+        OpenTelemetrySdkEventSource.Log.MeterProviderSdkEvent($"{nameof(MeterProviderSdk)}.{nameof(this.OnForceFlush)} called with {nameof(timeoutMilliseconds)} = {timeoutMilliseconds}.");
+        return this.Reader?.Collect(timeoutMilliseconds) ?? true;
+    }
+
+    /// <summary>
+    /// Called by <c>Shutdown</c>. This function should block the current
+    /// thread until shutdown completed or timed out.
+    /// </summary>
+    /// <param name="timeoutMilliseconds">
+    /// The number (non-negative) of milliseconds to wait, or
+    /// <c>Timeout.Infinite</c> to wait indefinitely.
+    /// </param>
+    /// <returns>
+    /// Returns <c>true</c> when shutdown succeeded; otherwise, <c>false</c>.
+    /// </returns>
+    /// <remarks>
+    /// This function is called synchronously on the thread which made the
+    /// first call to <c>Shutdown</c>. This function should not throw
+    /// exceptions.
+    /// </remarks>
+    internal bool OnShutdown(int timeoutMilliseconds)
+    {
+        OpenTelemetrySdkEventSource.Log.MeterProviderSdkEvent($"{nameof(MeterProviderSdk)}.{nameof(this.OnShutdown)} called with {nameof(timeoutMilliseconds)} = {timeoutMilliseconds}.");
+        return this.Reader?.Shutdown(timeoutMilliseconds) ?? true;
+    }
+
+    protected override void Dispose(bool disposing)
+    {
+        OpenTelemetrySdkEventSource.Log.MeterProviderSdkEvent($"{nameof(MeterProviderSdk)}.{nameof(this.Dispose)} started.");
+        if (!this.Disposed)
+        {
+            if (disposing)
+            {
+                foreach (var item in this.Instrumentations)
+                {
+                    (item as IDisposable)?.Dispose();
+                }
+
+                this.Instrumentations.Clear();
+
+                if (this.Reader != null)
+                {
+                    // Wait for up to 5 seconds grace period
+                    this.Reader.Shutdown(5_000);
+                    this.Reader.Dispose();
+                    this.Reader = null;
+                }
+
+                this.compositeMetricReader?.Dispose();
+                this.compositeMetricReader = null;
+
+                this.listener?.Dispose();
+
+                this.OwnedServiceProvider?.Dispose();
+                this.OwnedServiceProvider = null;
+            }
+
+            this.Disposed = true;
+            OpenTelemetrySdkEventSource.Log.ProviderDisposed(nameof(MeterProvider));
+            this.selfDiagnosticsRegistration?.Dispose();
+            this.selfDiagnosticsRegistration = null;
+        }
+
+        base.Dispose(disposing);
+    }
+
+    private static Predicate<Instrument>? CreateFilterPredicate(List<string> sources)
+    {
+        if (sources.Count == 1 && sources[0] == "*")
+        {
+            return static (_) => true;
+        }
+        else if (sources.Count == 0)
+        {
+            return null;
+        }
+
+        HashSet<string>? names = null;
+        List<string>? prefixes = null;
+        List<string>? wildcards = null;
+
+        foreach (var source in sources)
+        {
+            if (WildcardHelper.TryGetWildcardPrefix(source, out var prefix))
+            {
+                (prefixes ??= []).Add(prefix);
+            }
+            else if (WildcardHelper.ContainsWildcard(source))
+            {
+                (wildcards ??= []).Add(source);
+            }
+            else
+            {
+                (names ??= [with(StringComparer.OrdinalIgnoreCase)]).Add(source);
+            }
+        }
+
+        if (prefixes is { Count: > 1 })
+        {
+            // A linear StartsWith scan over multiple prefixes is only worthwhile for a single
+            // prefix; beyond that, a compiled Regex is simpler and at least as fast, especially
+            // when the prefixes share a long common substring.
+            wildcards ??= [];
+            foreach (var prefix in prefixes)
+            {
+                wildcards.Add(prefix + "*");
+            }
+
+            prefixes = null;
+        }
+
+        var hasNames = names is { Count: > 0 };
+        var hasPrefixes = prefixes is { Count: > 0 };
+        var hasWildcards = wildcards is { Count: > 0 };
+        var categoryCount = (hasNames ? 1 : 0) + (hasPrefixes ? 1 : 0) + (hasWildcards ? 1 : 0);
+
+        if (categoryCount == 1)
+        {
+            if (hasNames)
+            {
+#if NET
+                var frozenNames = names!.ToFrozenSet(StringComparer.OrdinalIgnoreCase);
+                return (instrument) => frozenNames.Contains(instrument.Meter.Name);
+#else
+                return (instrument) => names!.Contains(instrument.Meter.Name);
+#endif
+            }
+
+            if (hasPrefixes)
+            {
+                var singlePrefix = prefixes![0];
+                return (instrument) => instrument.Meter.Name.StartsWith(singlePrefix, StringComparison.OrdinalIgnoreCase);
+            }
+
+            var regex = WildcardHelper.GetWildcardRegex(wildcards!);
+            var regexPredicate = new RegexPredicate(regex);
+            return regexPredicate.IsMatch;
+        }
+        else
+        {
+            var namesPredicate = hasNames ? new HashSetPredicate(names!) : null;
+            var prefixPredicate = hasPrefixes ? new PrefixPredicate(prefixes![0]) : null;
+            var regexPredicate = hasWildcards ? new RegexPredicate(WildcardHelper.GetWildcardRegex(wildcards!)) : null;
+            var compositePredicate = new CompositePredicate(namesPredicate, prefixPredicate, regexPredicate);
+            return compositePredicate.IsMatch;
+        }
+    }
+
+    private void DisposeBuiltState(MeterProviderBuilderSdk state)
+    {
+        foreach (var reader in state.Readers)
+        {
+            CleanUp(() => reader.Shutdown(0));
+            CleanUp(reader.Dispose);
+        }
+
+        foreach (var instrumentation in state.Instrumentation)
+        {
+            if (instrumentation.Instance is IDisposable disposable)
+            {
+                CleanUp(disposable.Dispose);
+            }
+        }
+
+        if (this.OwnedServiceProvider != null)
+        {
+            CleanUp(this.OwnedServiceProvider.Dispose);
+            this.OwnedServiceProvider = null;
+        }
+
+        static void CleanUp(Action action)
+        {
+            try
+            {
+                action();
+            }
+            catch (Exception ex)
+            {
+                OpenTelemetrySdkEventSource.Log.MeterProviderException(nameof(this.DisposeBuiltState), ex);
+            }
+        }
+    }
+
+    private void ApplySpecificationConfigurationKeys(IConfiguration configuration)
+    {
+        var hasProgrammaticExemplarFilterValue = this.ExemplarFilter.HasValue;
+
+        if (configuration.TryGetStringValue(ExemplarFilterConfigKey, out var configValue))
+        {
+            if (hasProgrammaticExemplarFilterValue)
+            {
+                OpenTelemetrySdkEventSource.Log.MeterProviderSdkEvent(
+                    $"Exemplar filter configuration value '{configValue}' has been ignored because a value '{this.ExemplarFilter}' was set programmatically.");
+                return;
+            }
+
+            if (!TryParseExemplarFilterFromConfigurationValue(configValue, out var exemplarFilter))
+            {
+                OpenTelemetrySdkEventSource.Log.MeterProviderSdkEvent($"Exemplar filter configuration was found but the value '{configValue}' is invalid and will be ignored.");
+                return;
+            }
+
+            this.ExemplarFilter = exemplarFilter;
+
+            OpenTelemetrySdkEventSource.Log.MeterProviderSdkEvent($"Exemplar filter set to '{exemplarFilter}' from configuration.");
+        }
+
+        if (configuration.TryGetStringValue(ExemplarFilterHistogramsConfigKey, out configValue))
+        {
+            if (hasProgrammaticExemplarFilterValue)
+            {
+                OpenTelemetrySdkEventSource.Log.MeterProviderSdkEvent(
+                    $"Exemplar filter histogram configuration value '{configValue}' has been ignored because a value '{this.ExemplarFilter}' was set programmatically.");
+                return;
+            }
+
+            if (!TryParseExemplarFilterFromConfigurationValue(configValue, out var exemplarFilter))
+            {
+                OpenTelemetrySdkEventSource.Log.MeterProviderSdkEvent($"Exemplar filter histogram configuration was found but the value '{configValue}' is invalid and will be ignored.");
+                return;
+            }
+
+            this.ExemplarFilterForHistograms = exemplarFilter;
+
+            OpenTelemetrySdkEventSource.Log.MeterProviderSdkEvent($"Exemplar filter for histograms set to '{exemplarFilter}' from configuration.");
+        }
+
+        static bool TryParseExemplarFilterFromConfigurationValue(string? configValue, out ExemplarFilterType? exemplarFilter)
+        {
+            if (string.Equals("always_off", configValue, StringComparison.OrdinalIgnoreCase))
+            {
+                exemplarFilter = ExemplarFilterType.AlwaysOff;
+                return true;
+            }
+
+            if (string.Equals("always_on", configValue, StringComparison.OrdinalIgnoreCase))
+            {
+                exemplarFilter = ExemplarFilterType.AlwaysOn;
+                return true;
+            }
+
+            if (string.Equals("trace_based", configValue, StringComparison.OrdinalIgnoreCase))
+            {
+                exemplarFilter = ExemplarFilterType.TraceBased;
+                return true;
+            }
+
+            exemplarFilter = null;
+            return false;
+        }
+    }
+
+    private sealed class CompositePredicate(HashSetPredicate? hashSet, PrefixPredicate? prefix, RegexPredicate? regex)
+    {
+        private readonly HashSetPredicate? hashSet = hashSet;
+        private readonly PrefixPredicate? prefix = prefix;
+        private readonly RegexPredicate? regex = regex;
+
+        public bool IsMatch(Instrument instrument) =>
+            (this.hashSet?.IsMatch(instrument) ?? false) ||
+            (this.prefix?.IsMatch(instrument) ?? false) ||
+            (this.regex?.IsMatch(instrument) ?? false);
+    }
+
+    private sealed class HashSetPredicate(HashSet<string> hashSet)
+    {
+#if NET
+        private readonly FrozenSet<string> set = hashSet.ToFrozenSet(StringComparer.OrdinalIgnoreCase);
+#else
+        private readonly HashSet<string> set = hashSet;
+#endif
+
+        public bool IsMatch(Instrument instrument) => this.set.Contains(instrument.Meter.Name);
+    }
+
+    private sealed class PrefixPredicate(string prefix)
+    {
+        private readonly string prefix = prefix;
+
+        public bool IsMatch(Instrument instrument) => instrument.Meter.Name.StartsWith(this.prefix, StringComparison.OrdinalIgnoreCase);
+    }
+
+    private sealed class RegexPredicate(Regex regex)
+    {
+        private readonly Regex regex = regex;
+
+        public bool IsMatch(Instrument instrument) => WildcardHelper.IsMatch(this.regex, instrument.Meter.Name);
     }
 }

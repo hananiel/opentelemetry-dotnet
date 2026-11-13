@@ -1,82 +1,150 @@
-// <copyright file="Program.cs" company="OpenTelemetry Authors">
 // Copyright The OpenTelemetry Authors
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//     http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
-// </copyright>
+// SPDX-License-Identifier: Apache-2.0
 
-using System;
 using System.Diagnostics.Metrics;
-using System.Runtime.CompilerServices;
-using System.Threading;
+using System.Text.Json.Serialization;
+using CommandLine;
 using OpenTelemetry.Metrics;
 
 namespace OpenTelemetry.Tests.Stress;
 
-public partial class Program
+internal static class Program
 {
-    private const int ArraySize = 10;
-
-    // Note: Uncomment the below line if you want to run Histogram stress test
-    // private const int MaxHistogramMeasurement = 1000;
-
-    private static readonly Meter TestMeter = new(Utils.GetCurrentMethodName());
-    private static readonly Counter<long> TestCounter = TestMeter.CreateCounter<long>("TestCounter");
-    private static readonly string[] DimensionValues = new string[ArraySize];
-    private static readonly ThreadLocal<Random> ThreadLocalRandom = new(() => new Random());
-
-    // Note: Uncomment the below line if you want to run Histogram stress test
-    // private static readonly Histogram<long> TestHistogram = TestMeter.CreateHistogram<long>("TestHistogram");
-
-    public static void Main()
+    private enum MetricsStressTestType
     {
-        for (int i = 0; i < ArraySize; i++)
+        /// <summary>Histogram.</summary>
+        Histogram,
+
+        /// <summary>Counter.</summary>
+        Counter,
+    }
+
+    public static int Main(string[] args)
+        => StressTestFactory.RunSynchronously<MetricsStressTest, MetricsStressTestOptions>(args);
+
+#pragma warning disable CA1812 // Avoid uninstantiated internal classes
+    private sealed class MetricsStressTest : StressTests<MetricsStressTestOptions>
+#pragma warning restore CA1812 // Avoid uninstantiated internal classes
+    {
+        private const int ArraySize = 10;
+        private const int MaxHistogramMeasurement = 1000;
+
+        private static readonly Meter TestMeter = new(Utils.GetCurrentMethodName());
+        private static readonly Histogram<long> TestHistogram = TestMeter.CreateHistogram<long>("TestHistogram");
+        private static readonly Counter<long> TestCounter = TestMeter.CreateCounter<long>("TestCounter");
+        private static readonly string[] DimensionValues = new string[ArraySize];
+        private static readonly ThreadLocal<Random> ThreadLocalRandom = new(() => new Random());
+        private readonly MeterProvider meterProvider;
+
+        static MetricsStressTest()
         {
-            DimensionValues[i] = $"DimValue{i}";
+            for (var i = 0; i < ArraySize; i++)
+            {
+                DimensionValues[i] = $"DimValue{i}";
+            }
         }
 
-        using var meterProvider = Sdk.CreateMeterProviderBuilder()
-            .AddMeter(TestMeter.Name)
-            .AddPrometheusExporter(options =>
+        public MetricsStressTest(MetricsStressTestOptions options)
+            : base(options)
+        {
+            var builder = Sdk.CreateMeterProviderBuilder().AddMeter(TestMeter.Name);
+
+            if (options.PrometheusTestMetricsPort != 0)
             {
-                options.StartHttpListener = true;
-                options.HttpListenerPrefixes = new string[] { $"http://localhost:9185/" };
-                options.ScrapeResponseCacheDurationMilliseconds = 0;
-            })
-            .Build();
+                builder.AddPrometheusHttpListener(o => o.Port = options.PrometheusTestMetricsPort);
+            }
 
-        Stress(prometheusPort: 9184);
+            if (options.EnableExemplars)
+            {
+                builder.SetExemplarFilter(ExemplarFilterType.AlwaysOn);
+            }
+
+            if (options.AddViewToFilterTags)
+            {
+                builder
+                    .AddView("TestCounter", new MetricStreamConfiguration { TagKeys = ["DimName1"] })
+                    .AddView("TestHistogram", new MetricStreamConfiguration { TagKeys = ["DimName1"] });
+            }
+
+            if (options.AddOtlpExporter)
+            {
+                builder.AddOtlpExporter((exporterOptions, readerOptions) =>
+                {
+                    readerOptions.PeriodicExportingMetricReaderOptions.ExportIntervalMilliseconds = options.OtlpExporterExportIntervalMilliseconds;
+                });
+            }
+
+            this.meterProvider = builder.Build();
+        }
+
+        protected override void Dispose(bool disposing)
+        {
+            if (disposing)
+            {
+                this.meterProvider.Dispose();
+            }
+
+            base.Dispose(disposing);
+        }
+
+        protected override void WriteRunInformationToConsole()
+        {
+            if (this.Options.PrometheusTestMetricsPort != 0)
+            {
+                Console.Write($", testPrometheusEndpoint = http://localhost:{this.Options.PrometheusTestMetricsPort}/metrics/");
+            }
+        }
+
+        protected override void RunWorkItemInParallel()
+        {
+#if NET
+            var random = ThreadLocalRandom.Value!;
+#else
+            var random = ThreadLocalRandom.Value;
+#endif
+
+            if (this.Options.TestType == MetricsStressTestType.Histogram)
+            {
+                TestHistogram.Record(
+#pragma warning disable CA5394 // Do not use random number generators in secure applications
+                    random.Next(MaxHistogramMeasurement),
+                    new("DimName1", DimensionValues[random.Next(0, ArraySize)]),
+                    new("DimName2", DimensionValues[random.Next(0, ArraySize)]),
+                    new("DimName3", DimensionValues[random.Next(0, ArraySize)]));
+            }
+            else if (this.Options.TestType == MetricsStressTestType.Counter)
+            {
+                TestCounter.Add(
+                   100,
+                   new("DimName1", DimensionValues[random.Next(0, ArraySize)]),
+                   new("DimName2", DimensionValues[random.Next(0, ArraySize)]),
+                   new("DimName3", DimensionValues[random.Next(0, ArraySize)]));
+#pragma warning restore CA5394 // Do not use random number generators in secure applications
+            }
+        }
     }
 
-    [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    protected static void Run()
+#pragma warning disable CA1812 // Avoid uninstantiated internal classes
+    private sealed class MetricsStressTestOptions : StressTestOptions
+#pragma warning restore CA1812 // Avoid uninstantiated internal classes
     {
-        var random = ThreadLocalRandom.Value;
-        TestCounter.Add(
-            100,
-            new("DimName1", DimensionValues[random.Next(0, ArraySize)]),
-            new("DimName2", DimensionValues[random.Next(0, ArraySize)]),
-            new("DimName3", DimensionValues[random.Next(0, ArraySize)]));
-    }
+        [JsonConverter(typeof(JsonStringEnumConverter))]
+        [Option('t', "type", HelpText = "The metrics stress test type to run. Valid values: [Histogram, Counter]. Default value: Histogram.", Required = false)]
+        public MetricsStressTestType TestType { get; set; } = MetricsStressTestType.Histogram;
 
-    // Note: Uncomment the below lines if you want to run Histogram stress test
-    // [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    // protected static void Run()
-    // {
-    //    var random = ThreadLocalRandom.Value;
-    //    TestHistogram.Record(
-    //        random.Next(MaxHistogramMeasurement),
-    //        new("DimName1", DimensionValues[random.Next(0, ArraySize)]),
-    //        new("DimName2", DimensionValues[random.Next(0, ArraySize)]),
-    //        new("DimName3", DimensionValues[random.Next(0, ArraySize)]));
-    // }
+        [Option('m', "metrics_port", HelpText = "The Prometheus http listener port where Prometheus will be exposed for retrieving test metrics while the stress test is running. Set to '0' to disable. Default value: 9185.", Required = false)]
+        public int PrometheusTestMetricsPort { get; set; } = 9185;
+
+        [Option('v', "view", HelpText = "Whether or not a view should be configured to filter tags for the stress test. Default value: False.", Required = false)]
+        public bool AddViewToFilterTags { get; set; }
+
+        [Option('o', "otlp", HelpText = "Whether or not an OTLP exporter should be added for the stress test. Default value: False.", Required = false)]
+        public bool AddOtlpExporter { get; set; }
+
+        [Option('i', "interval", HelpText = "The OTLP exporter export interval in milliseconds. Default value: 5000.", Required = false)]
+        public int OtlpExporterExportIntervalMilliseconds { get; set; } = 5000;
+
+        [Option('e', "exemplars", HelpText = "Whether or not to enable exemplars for the stress test. Default value: False.", Required = false)]
+        public bool EnableExemplars { get; set; }
+    }
 }

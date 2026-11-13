@@ -1,100 +1,190 @@
-// <copyright file="OtlpMetricExporter.cs" company="OpenTelemetry Authors">
 // Copyright The OpenTelemetry Authors
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//     http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
-// </copyright>
+// SPDX-License-Identifier: Apache-2.0
 
-using System;
+using System.Buffers.Binary;
 using OpenTelemetry.Exporter.OpenTelemetryProtocol.Implementation;
-using OpenTelemetry.Exporter.OpenTelemetryProtocol.Implementation.ExportClient;
+using OpenTelemetry.Exporter.OpenTelemetryProtocol.Implementation.Serializer;
+using OpenTelemetry.Exporter.OpenTelemetryProtocol.Implementation.Transmission;
 using OpenTelemetry.Metrics;
-using OtlpCollector = Opentelemetry.Proto.Collector.Metrics.V1;
-using OtlpResource = Opentelemetry.Proto.Resource.V1;
+using OpenTelemetry.Resources;
 
-namespace OpenTelemetry.Exporter
+namespace OpenTelemetry.Exporter;
+
+/// <summary>
+/// Exporter consuming <see cref="Metric"/> and exporting the data using
+/// the OpenTelemetry protocol (OTLP).
+/// </summary>
+public class OtlpMetricExporter : BaseExporter<Metric>
 {
+    private const int GrpcStartWritePosition = 5;
+
+    // Initial buffer size set to ~732KB, so the buffer can be grown by doubling
+    // towards OtlpExporterOptions.MaxRequestSizeBytes without resizing often.
+    private const int InitialBufferSize = ProtobufSerializer.InitialBufferSize;
+
+    private readonly OtlpExporterTransmissionHandler transmissionHandler;
+    private readonly int startWritePosition;
+    private readonly int maxRequestSizeBytes;
+    private readonly SerializationBuffer serializationBuffer;
+
     /// <summary>
-    /// Exporter consuming <see cref="Metric"/> and exporting the data using
-    /// the OpenTelemetry protocol (OTLP).
+    /// Initializes a new instance of the <see cref="OtlpMetricExporter"/> class.
     /// </summary>
-    public class OtlpMetricExporter : BaseExporter<Metric>
+    /// <param name="options">Configuration options for the exporter.</param>
+    public OtlpMetricExporter(OtlpExporterOptions options)
+        : this(options ?? throw new ArgumentNullException(nameof(options)), experimentalOptions: new(), transmissionHandler: null)
     {
-        private readonly IExportClient<OtlpCollector.ExportMetricsServiceRequest> exportClient;
+    }
 
-        private OtlpResource.Resource processResource;
+    /// <summary>
+    /// Initializes a new instance of the <see cref="OtlpMetricExporter"/> class.
+    /// </summary>
+    /// <param name="exporterOptions"><see cref="OtlpExporterOptions"/>.</param>
+    /// <param name="experimentalOptions"><see cref="ExperimentalOptions"/>.</param>
+    /// <param name="transmissionHandler"><see cref="OtlpExporterTransmissionHandler"/>.</param>
+    internal OtlpMetricExporter(
+        OtlpExporterOptions exporterOptions,
+        ExperimentalOptions experimentalOptions,
+        OtlpExporterTransmissionHandler? transmissionHandler = null)
+    {
+#pragma warning disable CS0618 // Suppressing gRPC obsolete warning
+        this.startWritePosition = exporterOptions.Protocol == OtlpExportProtocol.Grpc ? GrpcStartWritePosition : 0;
+#pragma warning restore CS0618 // Suppressing gRPC obsolete warning
 
-        /// <summary>
-        /// Initializes a new instance of the <see cref="OtlpMetricExporter"/> class.
-        /// </summary>
-        /// <param name="options">Configuration options for the exporter.</param>
-        public OtlpMetricExporter(OtlpExporterOptions options)
-            : this(options, null)
+        this.maxRequestSizeBytes = exporterOptions.MaxRequestSizeBytes;
+        this.serializationBuffer = new(InitialBufferSize);
+
+        this.transmissionHandler = transmissionHandler ?? exporterOptions.GetExportTransmissionHandler(experimentalOptions, OtlpSignalType.Metrics);
+    }
+
+    internal Resource Resource
+    {
+        get
         {
+            // Collection can run before the provider is attached. Do not cache its empty fallback.
+            if (field == null && this.ParentProvider is { } parentProvider)
+            {
+                field = parentProvider.GetResource();
+            }
+
+            return field ?? Resource.Empty;
         }
 
-        /// <summary>
-        /// Initializes a new instance of the <see cref="OtlpMetricExporter"/> class.
-        /// </summary>
-        /// <param name="options">Configuration options for the export.</param>
-        /// <param name="exportClient">Client used for sending export request.</param>
-        internal OtlpMetricExporter(OtlpExporterOptions options, IExportClient<OtlpCollector.ExportMetricsServiceRequest> exportClient = null)
+        private set;
+    }
+
+    /// <inheritdoc />
+#pragma warning disable CA1725 // Parameter names should match base declaration
+#pragma warning disable SA1315 // Parameters should match inherited names
+    public override ExportResult Export(in Batch<Metric> metrics)
+#pragma warning restore SA1315 // Parameters should match inherited names
+#pragma warning restore CA1725 // Parameter names should match base declaration
+    {
+        // Prevents the exporter's gRPC and HTTP operations from being instrumented.
+        using var scope = SuppressInstrumentationScope.Begin();
+
+        // The exporter's own timeout starts before the batch is serialized (and the
+        // caller's deadline before Export was called), so that the time taken to
+        // serialize it counts towards the time the export is allowed to take.
+        var deadlineUtc = this.transmissionHandler.GetDeadlineUtc(this.ExportDeadlineUtc);
+
+        byte[]? buffer = null;
+        var serializationSucceeded = false;
+        var writePosition = 0;
+        var dirtyLength = 0;
+
+        try
         {
-            if (exportClient != null)
-            {
-                this.exportClient = exportClient;
-            }
-            else
-            {
-                this.exportClient = options.GetMetricsExportClient();
-            }
-        }
-
-        internal OtlpResource.Resource ProcessResource => this.processResource ??= this.ParentProvider.GetResource().ToOtlpResource();
-
-        /// <inheritdoc />
-        public override ExportResult Export(in Batch<Metric> metrics)
-        {
-            // Prevents the exporter's gRPC and HTTP operations from being instrumented.
-            using var scope = SuppressInstrumentationScope.Begin();
-
-            var request = new OtlpCollector.ExportMetricsServiceRequest();
+            buffer = this.serializationBuffer.Rent();
 
             try
             {
-                request.AddMetrics(this.ProcessResource, metrics);
-
-                if (!this.exportClient.SendExportRequest(request))
-                {
-                    return ExportResult.Failure;
-                }
+                writePosition = ProtobufOtlpMetricSerializer.WriteMetricsData(
+                    ref buffer,
+                    this.startWritePosition,
+                    this.Resource,
+                    metrics,
+                    out dirtyLength,
+                    this.maxRequestSizeBytes + this.startWritePosition);
+                serializationSucceeded = true;
             }
             catch (Exception ex)
             {
-                OpenTelemetryProtocolExporterEventSource.Log.ExportMethodException(ex);
+                OpenTelemetryProtocolExporterEventSource.Log.BatchDroppedDueToSerializationFailure(
+                    OtlpSignalType.Metrics,
+                    metrics.Count,
+                    ex);
                 return ExportResult.Failure;
             }
-            finally
+
+            // The serialization buffer is rented from a pool that can hand back more
+            // than was asked for, so the payload can overrun the configured limit.
+            // The specification requires that such a request is not made at all.
+            var requestSize = writePosition - this.startWritePosition;
+            if (requestSize > this.maxRequestSizeBytes)
             {
-                request.Return();
+                OpenTelemetryProtocolExporterEventSource.Log.RequestDiscardedDueToSizeLimit(
+                    OtlpSignalType.Metrics,
+                    metrics.Count,
+                    requestSize,
+                    this.maxRequestSizeBytes);
+
+                // Discard the oversized buffer rather than keeping it as the size hint.
+                serializationSucceeded = false;
+                return ExportResult.Failure;
             }
 
-            return ExportResult.Success;
+            if (this.startWritePosition == GrpcStartWritePosition)
+            {
+                // Grpc payload consists of 3 parts
+                // byte 0 - Specifying if the payload is compressed.
+                // 1-4 byte - Specifies the length of payload in big endian format.
+                // 5 and above -  Protobuf serialized data.
+                // Note: byte 0 must be explicitly cleared because the rented buffer is not zeroed.
+                buffer[0] = 0;
+                var data = new Span<byte>(buffer, 1, 4);
+                var dataLength = writePosition - GrpcStartWritePosition;
+                BinaryPrimitives.WriteUInt32BigEndian(data, (uint)dataLength);
+            }
+
+            if (!this.transmissionHandler.TrySubmitRequest(buffer, writePosition, deadlineUtc))
+            {
+                return ExportResult.Failure;
+            }
+        }
+        catch (Exception ex)
+        {
+            OpenTelemetryProtocolExporterEventSource.Log.ExportMethodException(ex);
+            return ExportResult.Failure;
+        }
+        finally
+        {
+            if (buffer != null)
+            {
+                if (serializationSucceeded)
+                {
+                    this.serializationBuffer.Return(buffer, writePosition, dirtyLength);
+                }
+                else
+                {
+                    this.serializationBuffer.Discard(buffer);
+                }
+            }
         }
 
-        /// <inheritdoc />
-        protected override bool OnShutdown(int timeoutMilliseconds)
+        return ExportResult.Success;
+    }
+
+    /// <inheritdoc />
+    protected override bool OnShutdown(int timeoutMilliseconds)
+    {
+        try
         {
-            return this.exportClient?.Shutdown(timeoutMilliseconds) ?? true;
+            return this.transmissionHandler.Shutdown(timeoutMilliseconds);
+        }
+        finally
+        {
+            this.serializationBuffer.Release();
         }
     }
 }

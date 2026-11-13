@@ -1,274 +1,287 @@
-// <copyright file="BatchExportProcessor.cs" company="OpenTelemetry Authors">
 // Copyright The OpenTelemetry Authors
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//     http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
-// </copyright>
+// SPDX-License-Identifier: Apache-2.0
 
-using System;
 using System.Diagnostics;
-using System.Threading;
+using System.Runtime.CompilerServices;
 using OpenTelemetry.Internal;
 
-namespace OpenTelemetry
+namespace OpenTelemetry;
+
+/// <summary>
+/// Implements processor that batches telemetry objects before calling exporter.
+/// </summary>
+/// <typeparam name="T">The type of telemetry object to be exported.</typeparam>
+public abstract class BatchExportProcessor<T> : BaseExportProcessor<T>
+    where T : class
 {
+    internal const int DefaultMaxQueueSize = 2048;
+    internal const int DefaultScheduledDelayMilliseconds = 5_000;
+    internal const int DefaultExporterTimeoutMilliseconds = 30_000;
+    internal const int DefaultMaxExportBatchSize = 512;
+
+    internal readonly int MaxExportBatchSize;
+    internal readonly int ScheduledDelayMilliseconds;
+    internal readonly int ExporterTimeoutMilliseconds;
+
+    private readonly CircularBuffer<T> circularBuffer;
+    private readonly BatchExportWorker<T> worker;
+
+    // Number of OnEnd calls currently in-flight (past the shutdown check).
+    // OnShutdown waits for this to reach zero so those items finish enqueueing
+    // before teardown, keeping the processed vs. already_shutdown counting race-free.
+    // It is striped per processor because every OnEnd on every thread touches it,
+    // and a single shared counter would serialize all of them on one cache line.
+    private readonly StripedCounter activeOnEndCount = new();
+    private int isShutdown;
+    private bool disposed;
+
     /// <summary>
-    /// Implements processor that batches telemetry objects before calling exporter.
+    /// Initializes a new instance of the <see cref="BatchExportProcessor{T}"/> class.
     /// </summary>
-    /// <typeparam name="T">The type of telemetry object to be exported.</typeparam>
-    public abstract class BatchExportProcessor<T> : BaseExportProcessor<T>
-        where T : class
+    /// <param name="exporter">Exporter instance.</param>
+    /// <param name="maxQueueSize">The maximum queue size. After the size is reached data are dropped. The default value is 2048.</param>
+    /// <param name="scheduledDelayMilliseconds">The delay interval in milliseconds between two consecutive exports. The default value is 5000.</param>
+    /// <param name="exporterTimeoutMilliseconds">How long the export can run before it is cancelled. The default value is 30000.</param>
+    /// <param name="maxExportBatchSize">The maximum batch size of every export. It must be smaller or equal to maxQueueSize. The default value is 512.</param>
+    protected BatchExportProcessor(
+        BaseExporter<T> exporter,
+        int maxQueueSize = DefaultMaxQueueSize,
+        int scheduledDelayMilliseconds = DefaultScheduledDelayMilliseconds,
+        int exporterTimeoutMilliseconds = DefaultExporterTimeoutMilliseconds,
+        int maxExportBatchSize = DefaultMaxExportBatchSize)
+        : base(exporter)
     {
-        internal const int DefaultMaxQueueSize = 2048;
-        internal const int DefaultScheduledDelayMilliseconds = 5000;
-        internal const int DefaultExporterTimeoutMilliseconds = 30000;
-        internal const int DefaultMaxExportBatchSize = 512;
+        Guard.ThrowIfOutOfRange(maxQueueSize, min: 1);
+        Guard.ThrowIfOutOfRange(maxExportBatchSize, min: 1, max: maxQueueSize, maxName: nameof(maxQueueSize));
+        Guard.ThrowIfOutOfRange(scheduledDelayMilliseconds, min: 1);
+        Guard.ThrowIfOutOfRange(exporterTimeoutMilliseconds, min: 0);
 
-        private readonly CircularBuffer<T> circularBuffer;
-        private readonly int scheduledDelayMilliseconds;
-        private readonly int exporterTimeoutMilliseconds;
-        private readonly int maxExportBatchSize;
-        private readonly Thread exporterThread;
-        private readonly AutoResetEvent exportTrigger = new(false);
-        private readonly ManualResetEvent dataExportedNotification = new(false);
-        private readonly ManualResetEvent shutdownTrigger = new(false);
-        private long shutdownDrainTarget = long.MaxValue;
-        private long droppedCount;
-        private bool disposed;
+        this.circularBuffer = new CircularBuffer<T>(maxQueueSize);
+        this.ScheduledDelayMilliseconds = scheduledDelayMilliseconds;
+        this.ExporterTimeoutMilliseconds = exporterTimeoutMilliseconds;
+        this.MaxExportBatchSize = maxExportBatchSize;
 
-        /// <summary>
-        /// Initializes a new instance of the <see cref="BatchExportProcessor{T}"/> class.
-        /// </summary>
-        /// <param name="exporter">Exporter instance.</param>
-        /// <param name="maxQueueSize">The maximum queue size. After the size is reached data are dropped. The default value is 2048.</param>
-        /// <param name="scheduledDelayMilliseconds">The delay interval in milliseconds between two consecutive exports. The default value is 5000.</param>
-        /// <param name="exporterTimeoutMilliseconds">How long the export can run before it is cancelled. The default value is 30000.</param>
-        /// <param name="maxExportBatchSize">The maximum batch size of every export. It must be smaller or equal to maxQueueSize. The default value is 512.</param>
-        protected BatchExportProcessor(
-            BaseExporter<T> exporter,
-            int maxQueueSize = DefaultMaxQueueSize,
-            int scheduledDelayMilliseconds = DefaultScheduledDelayMilliseconds,
-            int exporterTimeoutMilliseconds = DefaultExporterTimeoutMilliseconds,
-            int maxExportBatchSize = DefaultMaxExportBatchSize)
-            : base(exporter)
+        this.worker = this.CreateWorker();
+        this.worker.Start();
+    }
+
+    internal Action<long>? ExportStarted { get; set; }
+
+    /// <summary>
+    /// Gets the number of telemetry objects dropped by the processor.
+    /// </summary>
+    internal long DroppedCount => this.worker.DroppedCount;
+
+    /// <summary>
+    /// Gets the number of telemetry objects received by the processor.
+    /// </summary>
+    internal long ReceivedCount => this.circularBuffer.AddedCount + this.DroppedCount;
+
+    /// <summary>
+    /// Gets the number of telemetry objects processed by the underlying exporter.
+    /// </summary>
+    internal long ProcessedCount => this.circularBuffer.RemovedCount;
+
+    /// <summary>
+    /// Gets a value indicating whether <see cref="OnShutdown(int)"/> has been invoked.
+    /// </summary>
+    private bool IsShutdown => Volatile.Read(ref this.isShutdown) != 0;
+
+    /// <summary>
+    /// Marks the beginning of an <see cref="BaseProcessor{T}.OnEnd(T)"/> call which may enqueue data.
+    /// </summary>
+    /// <remarks>
+    /// When this returns a non-negative value the caller MUST invoke <see
+    /// cref="ExitOnEnd"/> with that value once it is done enqueueing. When it
+    /// returns a negative value the processor has already been shut down and
+    /// the caller MUST NOT enqueue.
+    /// </remarks>
+    /// <returns>
+    /// The token to pass to <see cref="ExitOnEnd"/> if the caller may proceed
+    /// to enqueue data; otherwise a negative value.
+    /// </returns>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    internal int TryEnterOnEnd()
+    {
+        if (this.IsShutdown)
         {
-            Guard.ThrowIfOutOfRange(maxQueueSize, min: 1);
-            Guard.ThrowIfOutOfRange(maxExportBatchSize, min: 1, max: maxQueueSize, maxName: nameof(maxQueueSize));
-            Guard.ThrowIfOutOfRange(scheduledDelayMilliseconds, min: 1);
-            Guard.ThrowIfOutOfRange(exporterTimeoutMilliseconds, min: 0);
-
-            this.circularBuffer = new CircularBuffer<T>(maxQueueSize);
-            this.scheduledDelayMilliseconds = scheduledDelayMilliseconds;
-            this.exporterTimeoutMilliseconds = exporterTimeoutMilliseconds;
-            this.maxExportBatchSize = maxExportBatchSize;
-            this.exporterThread = new Thread(new ThreadStart(this.ExporterProc))
-            {
-                IsBackground = true,
-                Name = $"OpenTelemetry-{nameof(BatchExportProcessor<T>)}-{exporter.GetType().Name}",
-            };
-            this.exporterThread.Start();
+            return -1;
         }
 
-        /// <summary>
-        /// Gets the number of telemetry objects dropped by the processor.
-        /// </summary>
-        internal long DroppedCount => this.droppedCount;
+        var token = this.activeOnEndCount.Enter();
 
-        /// <summary>
-        /// Gets the number of telemetry objects received by the processor.
-        /// </summary>
-        internal long ReceivedCount => this.circularBuffer.AddedCount + this.DroppedCount;
-
-        /// <summary>
-        /// Gets the number of telemetry objects processed by the underlying exporter.
-        /// </summary>
-        internal long ProcessedCount => this.circularBuffer.RemovedCount;
-
-        /// <inheritdoc/>
-        protected override void OnExport(T data)
+        if (this.IsShutdown)
         {
-            if (this.circularBuffer.TryAdd(data, maxSpinCount: 50000))
-            {
-                if (this.circularBuffer.Count >= this.maxExportBatchSize)
-                {
-                    this.exportTrigger.Set();
-                }
-
-                return; // enqueue succeeded
-            }
-
-            // either the queue is full or exceeded the spin limit, drop the item on the floor
-            Interlocked.Increment(ref this.droppedCount);
+            this.activeOnEndCount.Exit(token);
+            return -1;
         }
 
-        /// <inheritdoc/>
-        protected override bool OnForceFlush(int timeoutMilliseconds)
+        return token;
+    }
+
+    /// <summary>
+    /// Marks the end of an <see cref="BaseProcessor{T}.OnEnd(T)"/> call started by <see cref="TryEnterOnEnd"/>.
+    /// </summary>
+    /// <param name="token">The value returned by <see cref="TryEnterOnEnd"/>.</param>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    internal void ExitOnEnd(int token)
+        => this.activeOnEndCount.Exit(token);
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    internal bool TryExport(T data)
+    {
+        if (this.circularBuffer.TryAdd(data, maxSpinCount: 50_000, out var count))
         {
-            var tail = this.circularBuffer.RemovedCount;
-            var head = this.circularBuffer.AddedCount;
-
-            if (head == tail)
+            // Only the add which brings the queue up to the export batch size
+            // needs to wake the worker. While the queue stays at or above that
+            // size the worker exports continuously without waiting, so signalling
+            // for every item would cost each caller a kernel transition (and on
+            // Unix a process-wide lock inside the runtime's wait subsystem) for
+            // nothing. A crossing while the worker is idle is always observed by
+            // exactly one caller because the tail cannot move while it waits.
+            if (count == this.MaxExportBatchSize)
             {
-                return true; // nothing to flush
+                this.worker.TriggerExport();
             }
 
-            this.exportTrigger.Set();
-
-            if (timeoutMilliseconds == 0)
-            {
-                return false;
-            }
-
-            var triggers = new WaitHandle[] { this.dataExportedNotification, this.shutdownTrigger };
-
-            var sw = timeoutMilliseconds == Timeout.Infinite
-                ? null
-                : Stopwatch.StartNew();
-
-            // There is a chance that the export thread finished processing all the data from the queue,
-            // and signaled before we enter wait here, use polling to prevent being blocked indefinitely.
-            const int pollingMilliseconds = 1000;
-
-            while (true)
-            {
-                if (sw == null)
-                {
-                    try
-                    {
-                        WaitHandle.WaitAny(triggers, pollingMilliseconds);
-                    }
-                    catch (ObjectDisposedException)
-                    {
-                        return false;
-                    }
-                }
-                else
-                {
-                    var timeout = timeoutMilliseconds - sw.ElapsedMilliseconds;
-
-                    if (timeout <= 0)
-                    {
-                        return this.circularBuffer.RemovedCount >= head;
-                    }
-
-                    try
-                    {
-                        WaitHandle.WaitAny(triggers, Math.Min((int)timeout, pollingMilliseconds));
-                    }
-                    catch (ObjectDisposedException)
-                    {
-                        return false;
-                    }
-                }
-
-                if (this.circularBuffer.RemovedCount >= head)
-                {
-                    return true;
-                }
-
-                if (this.shutdownDrainTarget != long.MaxValue)
-                {
-                    return false;
-                }
-            }
+            return true; // enqueue succeeded
         }
 
-        /// <inheritdoc/>
-        protected override bool OnShutdown(int timeoutMilliseconds)
+        // either the queue is full or exceeded the spin limit, drop the item on the floor
+        this.worker.IncrementDroppedCount();
+        this.OnItemDropped();
+
+        return false;
+    }
+
+    /// <summary>
+    /// Invoked when an item could not be enqueued and was dropped.
+    /// </summary>
+    internal virtual void OnItemDropped()
+    {
+    }
+
+    /// <inheritdoc/>
+    protected override void OnExport(T data)
+        => this.TryExport(data);
+
+    /// <inheritdoc/>
+    protected override bool OnForceFlush(int timeoutMilliseconds)
+        => this.worker.WaitForExport(timeoutMilliseconds);
+
+    /// <inheritdoc/>
+    protected override bool OnShutdown(int timeoutMilliseconds)
+    {
+        // Note: BaseProcessor.Shutdown guarantees OnShutdown is invoked at most once, so
+        // the previous value is discarded. Interlocked is used instead of Volatile.Write
+        // for the full fence it provides, which TryEnterOnEnd relies on.
+        _ = Interlocked.Exchange(ref this.isShutdown, 1);
+
+        timeoutMilliseconds = this.WaitForActiveOnEndCalls(timeoutMilliseconds);
+
+        long? timestamp = timeoutMilliseconds == Timeout.Infinite ? null : Stopwatch.GetTimestamp();
+
+        var result = this.worker.Shutdown(timeoutMilliseconds);
+
+        OpenTelemetrySdkEventSource.Log.DroppedExportProcessorItems(this.GetType().Name, this.exporter.GetType().Name, this.DroppedCount);
+
+        if (timeoutMilliseconds == Timeout.Infinite)
         {
-            this.shutdownDrainTarget = this.circularBuffer.AddedCount;
-            this.shutdownTrigger.Set();
-
-            OpenTelemetrySdkEventSource.Log.DroppedExportProcessorItems(this.GetType().Name, this.exporter.GetType().Name, this.droppedCount);
-
-            if (timeoutMilliseconds == Timeout.Infinite)
-            {
-                this.exporterThread.Join();
-                return this.exporter.Shutdown();
-            }
-
-            if (timeoutMilliseconds == 0)
-            {
-                return this.exporter.Shutdown(0);
-            }
-
-            var sw = Stopwatch.StartNew();
-            this.exporterThread.Join(timeoutMilliseconds);
-            var timeout = timeoutMilliseconds - sw.ElapsedMilliseconds;
-            return this.exporter.Shutdown((int)Math.Max(timeout, 0));
+            return this.exporter.Shutdown() && result;
         }
 
-        /// <inheritdoc/>
-        protected override void Dispose(bool disposing)
+        if (timeoutMilliseconds == 0)
         {
-            if (!this.disposed)
-            {
-                if (disposing)
-                {
-                    this.exportTrigger.Dispose();
-                    this.dataExportedNotification.Dispose();
-                    this.shutdownTrigger.Dispose();
-                }
-
-                this.disposed = true;
-            }
-
-            base.Dispose(disposing);
+            return this.exporter.Shutdown(0) && result;
         }
 
-        private void ExporterProc()
+        if (timestamp is { } startedAt)
         {
-            var triggers = new WaitHandle[] { this.exportTrigger, this.shutdownTrigger };
-
-            while (true)
-            {
-                // only wait when the queue doesn't have enough items, otherwise keep busy and send data continuously
-                if (this.circularBuffer.Count < this.maxExportBatchSize)
-                {
-                    try
-                    {
-                        WaitHandle.WaitAny(triggers, this.scheduledDelayMilliseconds);
-                    }
-                    catch (ObjectDisposedException)
-                    {
-                        // the exporter is somehow disposed before the worker thread could finish its job
-                        return;
-                    }
-                }
-
-                if (this.circularBuffer.Count > 0)
-                {
-                    using (var batch = new Batch<T>(this.circularBuffer, this.maxExportBatchSize))
-                    {
-                        this.exporter.Export(batch);
-                    }
-
-                    try
-                    {
-                        this.dataExportedNotification.Set();
-                        this.dataExportedNotification.Reset();
-                    }
-                    catch (ObjectDisposedException)
-                    {
-                        // the exporter is somehow disposed before the worker thread could finish its job
-                        return;
-                    }
-                }
-
-                if (this.circularBuffer.RemovedCount >= this.shutdownDrainTarget)
-                {
-                    return;
-                }
-            }
+            timeoutMilliseconds = Stopwatch.Remaining(timeoutMilliseconds, startedAt);
         }
+
+        return this.exporter.Shutdown(timeoutMilliseconds) && result;
+    }
+
+    /// <inheritdoc/>
+    protected override void Dispose(bool disposing)
+    {
+        if (!this.disposed)
+        {
+            if (disposing)
+            {
+                this.worker?.Dispose();
+            }
+
+            this.disposed = true;
+        }
+
+        base.Dispose(disposing);
+    }
+
+    private BatchExportWorker<T> CreateWorker()
+    {
+#if NET
+        // Use task-based worker for browser platform where threading may be limited
+        if (!ThreadingHelper.IsThreadingEnabled())
+        {
+            return new BatchExportTaskWorker<T>(
+                this.circularBuffer,
+                this.exporter,
+                this.MaxExportBatchSize,
+                this.ScheduledDelayMilliseconds,
+                this.ExporterTimeoutMilliseconds,
+                this.OnExportStarted);
+        }
+#endif
+
+        // Use thread-based worker for all other platforms
+        return new BatchExportThreadWorker<T>(
+            this.circularBuffer,
+            this.exporter,
+            this.MaxExportBatchSize,
+            this.ScheduledDelayMilliseconds,
+            this.ExporterTimeoutMilliseconds,
+            this.OnExportStarted);
+    }
+
+    private void OnExportStarted(long count)
+        => this.ExportStarted?.Invoke(count);
+
+    /// <summary>
+    /// Waits for in-flight <see cref="BaseProcessor{T}.OnEnd(T)"/> calls to finish enqueueing so
+    /// teardown is consistent, without exceeding the caller's shutdown budget.
+    /// </summary>
+    /// <param name="timeoutMilliseconds">The shutdown timeout supplied by the caller.</param>
+    /// <returns>The remaining timeout available for the rest of the shutdown sequence.</returns>
+    private int WaitForActiveOnEndCalls(int timeoutMilliseconds)
+    {
+        if (this.activeOnEndCount.IsZero())
+        {
+            return timeoutMilliseconds;
+        }
+
+        SpinWait spinner = default;
+
+        if (timeoutMilliseconds == Timeout.Infinite)
+        {
+            while (!this.activeOnEndCount.IsZero())
+            {
+                spinner.SpinOnce();
+            }
+
+            return Timeout.Infinite;
+        }
+
+        var startedAt = Stopwatch.GetTimestamp();
+        int remainingMilliseconds;
+
+        while ((remainingMilliseconds = Stopwatch.Remaining(timeoutMilliseconds, startedAt)) > 0
+            && !this.activeOnEndCount.IsZero())
+        {
+            spinner.SpinOnce();
+        }
+
+        return remainingMilliseconds;
     }
 }

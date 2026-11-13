@@ -1,174 +1,188 @@
-// <copyright file="CompositeProcessor.cs" company="OpenTelemetry Authors">
 // Copyright The OpenTelemetry Authors
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//     http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
-// </copyright>
+// SPDX-License-Identifier: Apache-2.0
 
-using System;
-using System.Collections.Generic;
 using System.Diagnostics;
-using System.Threading;
 using OpenTelemetry.Internal;
 
-namespace OpenTelemetry
+namespace OpenTelemetry;
+
+/// <summary>
+/// Represents a chain of <see cref="BaseProcessor{T}"/>s.
+/// </summary>
+/// <typeparam name="T">The type of object to be processed.</typeparam>
+public class CompositeProcessor<T> : BaseProcessor<T>
 {
-    public class CompositeProcessor<T> : BaseProcessor<T>
+    internal readonly DoublyLinkedListNode Head;
+    private DoublyLinkedListNode tail;
+    private bool disposed;
+
+    /// <summary>
+    /// Initializes a new instance of the <see cref="CompositeProcessor{T}"/> class.
+    /// </summary>
+    /// <param name="processors">Processors to add to the composite processor chain.</param>
+    public CompositeProcessor(IEnumerable<BaseProcessor<T>> processors)
     {
-        private readonly DoublyLinkedListNode head;
-        private DoublyLinkedListNode tail;
-        private bool disposed;
+        Guard.ThrowIfNull(processors);
 
-        public CompositeProcessor(IEnumerable<BaseProcessor<T>> processors)
+#pragma warning disable CA1062 // Validate arguments of public methods - needed for netstandard2.1
+        using var iter = processors.GetEnumerator();
+#pragma warning restore CA1062 // Validate arguments of public methods - needed for netstandard2.1
+        if (!iter.MoveNext())
         {
-            Guard.ThrowIfNull(processors);
-
-            using var iter = processors.GetEnumerator();
-            if (!iter.MoveNext())
-            {
-                throw new ArgumentException($"'{iter}' is null or empty", nameof(iter));
-            }
-
-            this.head = new DoublyLinkedListNode(iter.Current);
-            this.tail = this.head;
-
-            while (iter.MoveNext())
-            {
-                this.AddProcessor(iter.Current);
-            }
+            throw new ArgumentException($"'{iter}' is null or empty", nameof(processors));
         }
 
-        public CompositeProcessor<T> AddProcessor(BaseProcessor<T> processor)
+        this.Head = new DoublyLinkedListNode(iter.Current);
+        this.tail = this.Head;
+
+        while (iter.MoveNext())
         {
-            Guard.ThrowIfNull(processor);
+            this.AddProcessor(iter.Current);
+        }
+    }
 
-            var node = new DoublyLinkedListNode(processor)
-            {
-                Previous = this.tail,
-            };
-            this.tail.Next = node;
-            this.tail = node;
+    /// <summary>
+    /// Adds a processor to the composite processor chain.
+    /// </summary>
+    /// <param name="processor"><see cref="BaseProcessor{T}"/>.</param>
+    /// <returns>The current instance to support call chaining.</returns>
+    public CompositeProcessor<T> AddProcessor(BaseProcessor<T> processor)
+    {
+        Guard.ThrowIfNull(processor);
 
-            return this;
+        var node = new DoublyLinkedListNode(processor)
+        {
+            Previous = this.tail,
+        };
+        this.tail.Next = node;
+        this.tail = node;
+
+        return this;
+    }
+
+    /// <inheritdoc/>
+    public override void OnEnd(T data)
+    {
+        for (var current = this.Head; current != null; current = current.Next)
+        {
+            current.Value.OnEnd(data);
+        }
+    }
+
+    /// <inheritdoc/>
+    public override void OnStart(T data)
+    {
+        for (var current = this.Head; current != null; current = current.Next)
+        {
+            current.Value.OnStart(data);
+        }
+    }
+
+    internal override void SetParentProvider(BaseProvider parentProvider)
+    {
+        base.SetParentProvider(parentProvider);
+
+        for (var current = this.Head; current != null; current = current.Next)
+        {
+            current.Value.SetParentProvider(parentProvider);
+        }
+    }
+
+    internal IReadOnlyList<BaseProcessor<T>> ToReadOnlyList()
+    {
+        var list = new List<BaseProcessor<T>>();
+
+        for (var current = this.Head; current != null; current = current.Next)
+        {
+            list.Add(current.Value);
         }
 
-        /// <inheritdoc/>
-        public override void OnEnd(T data)
+        return list;
+    }
+
+    /// <inheritdoc/>
+    protected override bool OnForceFlush(int timeoutMilliseconds)
+    {
+        var result = true;
+        var initialTimeoutMilliseconds = timeoutMilliseconds;
+        long? timestamp = timeoutMilliseconds == Timeout.Infinite ? null : Stopwatch.GetTimestamp();
+
+        for (var current = this.Head; current != null; current = current.Next)
         {
-            for (var cur = this.head; cur != null; cur = cur.Next)
+            var currentTimeoutMilliseconds = timeoutMilliseconds;
+
+            if (timestamp is { } startedAt)
             {
-                cur.Value.OnEnd(data);
+                currentTimeoutMilliseconds = Stopwatch.Remaining(initialTimeoutMilliseconds, startedAt);
             }
+
+            // Notify all the processors, even if we run overtime
+            result = current.Value.ForceFlush(currentTimeoutMilliseconds) && result;
         }
 
-        /// <inheritdoc/>
-        public override void OnStart(T data)
+        return result;
+    }
+
+    /// <inheritdoc/>
+    protected override bool OnShutdown(int timeoutMilliseconds)
+    {
+        var result = true;
+        var initialTimeoutMilliseconds = timeoutMilliseconds;
+        long? timestamp = timeoutMilliseconds == Timeout.Infinite ? null : Stopwatch.GetTimestamp();
+
+        for (var current = this.Head; current != null; current = current.Next)
         {
-            for (var cur = this.head; cur != null; cur = cur.Next)
+            var currentTimeoutMilliseconds = timeoutMilliseconds;
+
+            if (timestamp is { } startedAt)
             {
-                cur.Value.OnStart(data);
+                currentTimeoutMilliseconds = Stopwatch.Remaining(initialTimeoutMilliseconds, startedAt);
             }
+
+            // Notify all the processors, even if we run overtime
+            result = current.Value.Shutdown(currentTimeoutMilliseconds) && result;
         }
 
-        /// <inheritdoc/>
-        protected override bool OnForceFlush(int timeoutMilliseconds)
-        {
-            var result = true;
-            var sw = timeoutMilliseconds == Timeout.Infinite
-                ? null
-                : Stopwatch.StartNew();
+        return result;
+    }
 
-            for (var cur = this.head; cur != null; cur = cur.Next)
+    /// <inheritdoc/>
+    protected override void Dispose(bool disposing)
+    {
+        if (!this.disposed)
+        {
+            if (disposing)
             {
-                if (sw == null)
+                for (var current = this.Head; current != null; current = current.Next)
                 {
-                    result = cur.Value.ForceFlush(Timeout.Infinite) && result;
-                }
-                else
-                {
-                    var timeout = timeoutMilliseconds - sw.ElapsedMilliseconds;
-
-                    // notify all the processors, even if we run overtime
-                    result = cur.Value.ForceFlush((int)Math.Max(timeout, 0)) && result;
-                }
-            }
-
-            return result;
-        }
-
-        /// <inheritdoc/>
-        protected override bool OnShutdown(int timeoutMilliseconds)
-        {
-            var result = true;
-            var sw = timeoutMilliseconds == Timeout.Infinite
-                ? null
-                : Stopwatch.StartNew();
-
-            for (var cur = this.head; cur != null; cur = cur.Next)
-            {
-                if (sw == null)
-                {
-                    result = cur.Value.Shutdown(Timeout.Infinite) && result;
-                }
-                else
-                {
-                    var timeout = timeoutMilliseconds - sw.ElapsedMilliseconds;
-
-                    // notify all the processors, even if we run overtime
-                    result = cur.Value.Shutdown((int)Math.Max(timeout, 0)) && result;
-                }
-            }
-
-            return result;
-        }
-
-        /// <inheritdoc/>
-        protected override void Dispose(bool disposing)
-        {
-            if (!this.disposed)
-            {
-                if (disposing)
-                {
-                    for (var cur = this.head; cur != null; cur = cur.Next)
+                    try
                     {
-                        try
-                        {
-                            cur.Value?.Dispose();
-                        }
-                        catch (Exception ex)
-                        {
-                            OpenTelemetrySdkEventSource.Log.SpanProcessorException(nameof(this.Dispose), ex);
-                        }
+                        current.Value.Dispose();
+                    }
+                    catch (Exception ex)
+                    {
+                        OpenTelemetrySdkEventSource.Log.SpanProcessorException(nameof(this.Dispose), ex);
                     }
                 }
-
-                this.disposed = true;
             }
 
-            base.Dispose(disposing);
+            this.disposed = true;
         }
 
-        private class DoublyLinkedListNode
+        base.Dispose(disposing);
+    }
+
+    internal sealed class DoublyLinkedListNode
+    {
+        public readonly BaseProcessor<T> Value;
+
+        public DoublyLinkedListNode(BaseProcessor<T> value)
         {
-            public readonly BaseProcessor<T> Value;
-
-            public DoublyLinkedListNode(BaseProcessor<T> value)
-            {
-                this.Value = value;
-            }
-
-            public DoublyLinkedListNode Previous { get; set; }
-
-            public DoublyLinkedListNode Next { get; set; }
+            this.Value = value;
         }
+
+        public DoublyLinkedListNode? Previous { get; set; }
+
+        public DoublyLinkedListNode? Next { get; set; }
     }
 }

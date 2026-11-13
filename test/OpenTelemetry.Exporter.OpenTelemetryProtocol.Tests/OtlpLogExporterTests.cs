@@ -1,244 +1,2450 @@
-// <copyright file="OtlpLogExporterTests.cs" company="OpenTelemetry Authors">
 // Copyright The OpenTelemetry Authors
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//     http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
-// </copyright>
+// SPDX-License-Identifier: Apache-2.0
 
-using System;
-using System.Collections.Generic;
+using System.Collections.ObjectModel;
 using System.Diagnostics;
+using System.Diagnostics.Tracing;
+using System.Globalization;
+#if NETFRAMEWORK
+using System.Net.Http;
+#endif
+using Microsoft.Extensions.Configuration;
+using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 using OpenTelemetry.Exporter.OpenTelemetryProtocol.Implementation;
+using OpenTelemetry.Exporter.OpenTelemetryProtocol.Implementation.Serializer;
+using OpenTelemetry.Exporter.OpenTelemetryProtocol.Implementation.Transmission;
 using OpenTelemetry.Internal;
 using OpenTelemetry.Logs;
+using OpenTelemetry.Proto.Trace.V1;
+using OpenTelemetry.Resources;
 using OpenTelemetry.Tests;
 using OpenTelemetry.Trace;
-using Xunit;
+using static OpenTelemetry.Proto.Common.V1.AnyValue;
+using OtlpCollector = OpenTelemetry.Proto.Collector.Logs.V1;
+using OtlpCommon = OpenTelemetry.Proto.Common.V1;
+using OtlpLogs = OpenTelemetry.Proto.Logs.V1;
 
-namespace OpenTelemetry.Exporter.OpenTelemetryProtocol.Tests
+namespace OpenTelemetry.Exporter.OpenTelemetryProtocol.Tests;
+
+[Collection(EventSourceCollectionDefinition.Name)]
+public class OtlpLogExporterTests
 {
-    public class OtlpLogExporterTests : Http2UnencryptedSupportTests
+    private static readonly SdkLimitOptions DefaultSdkLimitOptions = new();
+
+    [Fact]
+    public void AddOtlpExporterWithNamedOptions()
     {
-        [Fact]
-        public void CheckToOtlpLogRecordStateValues()
-        {
-            List<LogRecord> logRecords = new List<LogRecord>();
-            using var loggerFactory = LoggerFactory.Create(builder =>
+        var defaultConfigureExporterOptionsInvocations = 0;
+        var namedConfigureExporterOptionsInvocations = 0;
+
+        var defaultConfigureSdkLimitsOptionsInvocations = 0;
+        var namedConfigureSdkLimitsOptionsInvocations = 0;
+
+        using var loggerProvider = Sdk.CreateLoggerProviderBuilder()
+            .ConfigureServices(services =>
             {
-                builder.AddOpenTelemetry(options =>
+                services.Configure<OtlpExporterOptions>(o => defaultConfigureExporterOptionsInvocations++);
+                services.Configure<LogRecordExportProcessorOptions>(o => defaultConfigureExporterOptionsInvocations++);
+                services.Configure<ExperimentalOptions>(o => defaultConfigureExporterOptionsInvocations++);
+
+                services.Configure<OtlpExporterOptions>("Exporter2", o => namedConfigureExporterOptionsInvocations++);
+                services.Configure<LogRecordExportProcessorOptions>("Exporter2", o => namedConfigureExporterOptionsInvocations++);
+                services.Configure<ExperimentalOptions>("Exporter2", o => namedConfigureExporterOptionsInvocations++);
+
+                services.Configure<OtlpExporterOptions>("Exporter3", o => namedConfigureExporterOptionsInvocations++);
+                services.Configure<LogRecordExportProcessorOptions>("Exporter3", o => namedConfigureExporterOptionsInvocations++);
+                services.Configure<ExperimentalOptions>("Exporter3", o => namedConfigureExporterOptionsInvocations++);
+
+                services.Configure<SdkLimitOptions>(o => defaultConfigureSdkLimitsOptionsInvocations++);
+                services.Configure<SdkLimitOptions>("Exporter2", o => namedConfigureSdkLimitsOptionsInvocations++);
+                services.Configure<SdkLimitOptions>("Exporter3", o => namedConfigureSdkLimitsOptionsInvocations++);
+            })
+            .AddOtlpExporter()
+            .AddOtlpExporter("Exporter2", o => { })
+            .AddOtlpExporter("Exporter3", o => { })
+            .Build();
+
+        Assert.Equal(3, defaultConfigureExporterOptionsInvocations);
+        Assert.Equal(6, namedConfigureExporterOptionsInvocations);
+
+        // Note: SdkLimitOptions does NOT support named options. We only allow a
+        // single instance for a given IServiceCollection.
+        Assert.Equal(1, defaultConfigureSdkLimitsOptionsInvocations);
+        Assert.Equal(0, namedConfigureSdkLimitsOptionsInvocations);
+    }
+
+    [Fact]
+    public void UserHttpFactoryCalledWhenUsingHttpProtobuf()
+    {
+        var options = new OtlpExporterOptions();
+
+        var defaultFactory = options.HttpClientFactory;
+
+        var invocations = 0;
+        options.Protocol = OtlpExportProtocol.HttpProtobuf;
+        options.HttpClientFactory = () =>
+        {
+            invocations++;
+            return defaultFactory();
+        };
+
+        using (var exporter = new OtlpLogExporter(options))
+        {
+            Assert.Equal(1, invocations);
+        }
+
+        using (var provider = Sdk.CreateLoggerProviderBuilder()
+            .AddOtlpExporter(o =>
+            {
+                o.Protocol = OtlpExportProtocol.HttpProtobuf;
+                o.HttpClientFactory = options.HttpClientFactory;
+            })
+            .Build())
+        {
+            Assert.Equal(2, invocations);
+        }
+
+        options.HttpClientFactory = () => null!;
+        Assert.Throws<InvalidOperationException>(() =>
+        {
+            using var exporter = new OtlpLogExporter(options);
+        });
+    }
+
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public void ServiceProviderHttpClientFactoryNotInvokedDuringLoggerFactoryCreation(bool callUseOpenTelemetry)
+    {
+        var services = new ServiceCollection();
+
+        services.AddHttpClient();
+
+        var invocations = 0;
+
+        services.AddHttpClient("OtlpLogExporter", configureClient: (client) => invocations++);
+
+        services.AddLogging(builder =>
+        {
+            ConfigureOtlpExporter(
+                builder,
+                callUseOpenTelemetry,
+                configureExporter: o => o.Protocol = OtlpExportProtocol.HttpProtobuf);
+        });
+
+        using var serviceProvider = services.BuildServiceProvider();
+        _ = serviceProvider.GetRequiredService<ILoggerFactory>();
+
+        Assert.NotNull(serviceProvider);
+        Assert.Equal(0, invocations);
+    }
+
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public void ServiceProviderHttpClientFactoryInvokedForExportWithoutCircularDependency(bool callUseOpenTelemetry)
+    {
+        using var testHandler = new TestHttpMessageHandler();
+
+        var services = new ServiceCollection();
+
+        var invocations = 0;
+
+        services.AddHttpClient("OtlpLogExporter")
+            .ConfigurePrimaryHttpMessageHandler(() => testHandler)
+            .AddHttpMessageHandler(sp =>
+            {
+                _ = sp.GetRequiredService<ILoggerFactory>();
+                invocations++;
+                return new PassThroughDelegatingHandler();
+            });
+
+        services.AddLogging(builder =>
+        {
+            ConfigureOtlpExporter(
+                builder,
+                callUseOpenTelemetry,
+                configureExporterAndProcessor: (exporter, processor) =>
+                {
+                    exporter.Protocol = OtlpExportProtocol.HttpProtobuf;
+                    exporter.Endpoint = new Uri("http://localhost:4318");
+                    processor.ExportProcessorType = ExportProcessorType.Simple;
+                });
+        });
+
+        using var serviceProvider = services.BuildServiceProvider();
+        var loggerFactory = serviceProvider.GetRequiredService<ILoggerFactory>();
+        var logger = loggerFactory.CreateLogger(nameof(OtlpLogExporterTests));
+
+        Assert.Equal(0, invocations);
+
+        logger.HelloFrom("tomato", 2.99);
+
+        Assert.Equal(1, invocations);
+        Assert.NotNull(testHandler.HttpRequestMessage);
+    }
+
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public void LogsAreExportedWhenServiceProviderIsDisposedBeforeFirstExport(bool callUseOpenTelemetry)
+    {
+        var requests = new List<string>();
+
+        using var server = TestHttpServer.RunServer(
+            context =>
+            {
+                lock (requests)
+                {
+                    requests.Add(context.Request.Url!.AbsolutePath);
+                }
+
+                context.Response.StatusCode = 200;
+                context.Response.Close();
+            },
+            out var host,
+            out var port);
+
+        var services = new ServiceCollection();
+
+        var namedClientInvocations = 0;
+
+        services.AddHttpClient("OtlpLogExporter", configureClient: (client) => namedClientInvocations++);
+
+        services.AddLogging(builder =>
+        {
+            ConfigureOtlpExporter(
+                builder,
+                callUseOpenTelemetry,
+                configureExporterAndProcessor: (exporter, processor) =>
+                {
+                    exporter.Protocol = OtlpExportProtocol.HttpProtobuf;
+                    exporter.Endpoint = new Uri($"http://{host}:{port}/v1/logs");
+                    processor.ExportProcessorType = ExportProcessorType.Batch;
+
+                    // Ensure the only export is the one triggered by disposal
+                    // rather than the batch processor's scheduled timer.
+                    processor.BatchExportProcessorOptions.ScheduledDelayMilliseconds = int.MaxValue;
+                });
+        });
+
+        using var serviceProvider = services.BuildServiceProvider();
+
+        var logger = serviceProvider.GetRequiredService<ILoggerFactory>().CreateLogger(nameof(OtlpLogExporterTests));
+
+        logger.HelloFrom("tomato", 2.99);
+
+        // No export has happened yet so the export client has not been created.
+        Assert.Equal(0, namedClientInvocations);
+
+        // Disposing the container disposes the LoggerProvider which flushes the
+        // pending batch. The container is already marked as disposed by then so
+        // IHttpClientFactory cannot be resolved from it.
+        serviceProvider.Dispose();
+
+        lock (requests)
+        {
+            Assert.Equal(["/v1/logs"], requests);
+        }
+
+        Assert.Equal(0, namedClientInvocations);
+    }
+
+    [Fact]
+    public void AddOtlpExporterSetsDefaultBatchExportProcessor()
+    {
+        using var loggerProvider = Sdk.CreateLoggerProviderBuilder()
+            .AddOtlpExporter()
+            .Build();
+
+        var loggerProviderSdk = loggerProvider as LoggerProviderSdk;
+        Assert.NotNull(loggerProviderSdk);
+
+        var batchProcessor = loggerProviderSdk.Processor as BatchLogRecordExportProcessor;
+        Assert.NotNull(batchProcessor);
+
+        Assert.Equal(BatchLogRecordExportProcessor.DefaultScheduledDelayMilliseconds, batchProcessor.ScheduledDelayMilliseconds);
+        Assert.Equal(BatchLogRecordExportProcessor.DefaultExporterTimeoutMilliseconds, batchProcessor.ExporterTimeoutMilliseconds);
+        Assert.Equal(BatchLogRecordExportProcessor.DefaultMaxExportBatchSize, batchProcessor.MaxExportBatchSize);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void AddOtlpLogExporterReceivesAttributesWithParseStateValueSetToFalse(bool callUseOpenTelemetry)
+    {
+        var optionsValidated = false;
+
+        var logRecords = new List<LogRecord>();
+        using var loggerFactory = LoggerFactory.Create(builder =>
+        {
+            ConfigureOtlpExporter(builder, callUseOpenTelemetry, logRecords: logRecords);
+
+            builder.Services.Configure<OpenTelemetryLoggerOptions>(o =>
+            {
+                optionsValidated = true;
+                Assert.False(o.ParseStateValues);
+            });
+        });
+
+        Assert.True(optionsValidated);
+
+        var logger = loggerFactory.CreateLogger("OtlpLogExporterTests");
+        logger.HelloFrom("tomato", 2.99);
+        var logRecord = Assert.Single(logRecords);
+#pragma warning disable CS0618 // Type or member is obsolete
+        Assert.NotNull(logRecord.State);
+#pragma warning restore CS0618 // Type or member is obsolete
+        Assert.NotNull(logRecord.Attributes);
+    }
+
+    [Theory]
+    [InlineData(true, false)]
+    [InlineData(false, false)]
+    [InlineData(true, true)]
+    [InlineData(false, true)]
+    public void AddOtlpLogExporterParseStateValueCanBeTurnedOff(bool parseState, bool callUseOpenTelemetry)
+    {
+        var logRecords = new List<LogRecord>();
+        using var loggerFactory = LoggerFactory.Create(builder =>
+        {
+            ConfigureOtlpExporter(
+                builder,
+                callUseOpenTelemetry,
+                configureOptions: o => o.ParseStateValues = parseState,
+                logRecords: logRecords);
+        });
+
+#pragma warning disable CA1873
+        var logger = loggerFactory.CreateLogger("OtlpLogExporterTests");
+        logger.Log(LogLevel.Information, default, new { propertyA = "valueA" }, null, (s, e) => "Custom state log message");
+#pragma warning restore CA1873
+
+        var logRecord = Assert.Single(logRecords);
+
+#pragma warning disable CS0618 // Type or member is obsolete
+        if (parseState)
+        {
+            Assert.Null(logRecord.State);
+            Assert.NotNull(logRecord.Attributes);
+
+            // Note: We currently do not support parsing custom states which do
+            // not implement the standard interfaces. We return empty attributes
+            // for these.
+            Assert.Empty(logRecord.Attributes);
+        }
+        else
+        {
+            Assert.NotNull(logRecord.State);
+            Assert.Null(logRecord.Attributes);
+        }
+#pragma warning restore CS0618 // Type or member is obsolete
+    }
+
+    [Theory]
+    [InlineData(true, false)]
+    [InlineData(false, false)]
+    [InlineData(true, true)]
+    [InlineData(false, true)]
+    public void AddOtlpLogExporterParseStateValueCanBeTurnedOffHosting(bool parseState, bool callUseOpenTelemetry)
+    {
+        var logRecords = new List<LogRecord>();
+
+        var hostBuilder = new HostBuilder();
+        hostBuilder.ConfigureLogging(logging =>
+        {
+            logging.ClearProviders();
+            ConfigureOtlpExporter(logging, callUseOpenTelemetry, logRecords: logRecords);
+        });
+
+        hostBuilder.ConfigureServices(services =>
+        services.Configure<OpenTelemetryLoggerOptions>(options => options.ParseStateValues = parseState));
+
+        var host = hostBuilder.Build();
+        var loggerFactory = host.Services.GetService<ILoggerFactory>();
+        Assert.NotNull(loggerFactory);
+
+#pragma warning disable CA1873
+        var logger = loggerFactory.CreateLogger("OtlpLogExporterTests");
+        logger.Log(LogLevel.Information, default, new { propertyA = "valueA" }, null, (s, e) => "Custom state log message");
+#pragma warning restore CA1873
+
+        var logRecord = Assert.Single(logRecords);
+
+#pragma warning disable CS0618 // Type or member is obsolete
+        if (parseState)
+        {
+            Assert.Null(logRecord.State);
+            Assert.NotNull(logRecord.Attributes);
+
+            // Note: We currently do not support parsing custom states which do
+            // not implement the standard interfaces. We return empty attributes
+            // for these.
+            Assert.Empty(logRecord.Attributes);
+        }
+        else
+        {
+            Assert.NotNull(logRecord.State);
+            Assert.Null(logRecord.Attributes);
+        }
+#pragma warning restore CS0618 // Type or member is obsolete
+    }
+
+    [Fact]
+    public void OtlpLogRecordTestWhenStateValuesArePopulated()
+    {
+        var logRecords = new List<LogRecord>();
+        using var loggerFactory = LoggerFactory.Create(builder =>
+        {
+            builder.UseOpenTelemetry(
+                logging => logging.AddInMemoryExporter(logRecords),
+                options =>
                 {
                     options.IncludeFormattedMessage = true;
                     options.ParseStateValues = true;
-                    options.AddInMemoryExporter(logRecords);
                 });
-            });
+        });
 
-            var logger = loggerFactory.CreateLogger("OtlpLogExporterTests");
-            logger.LogInformation("Hello from {name} {price}.", "tomato", 2.99);
+        var logger = loggerFactory.CreateLogger("OtlpLogExporterTests");
+        logger.HelloFrom("tomato", 2.99);
 
-            Assert.Single(logRecords);
+        var logRecord = Assert.Single(logRecords);
+        var otlpLogRecord = ToOtlpLogs(DefaultSdkLimitOptions, new ExperimentalOptions(), logRecord);
 
-            var logRecord = logRecords[0];
-            var otlpLogRecord = logRecord.ToOtlpLog();
+        Assert.NotNull(otlpLogRecord);
+        Assert.Equal("Hello from tomato 2.99.", otlpLogRecord.Body.StringValue);
+        Assert.Equal(3, otlpLogRecord.Attributes.Count);
+        var index = 0;
+        var attribute = otlpLogRecord.Attributes[index];
 
-            Assert.NotNull(otlpLogRecord);
-            Assert.Equal("Hello from tomato 2.99.", otlpLogRecord.Body.StringValue);
-            Assert.Contains("name", otlpLogRecord.Attributes.ToString());
-            Assert.Contains("tomato", otlpLogRecord.Attributes.ToString());
-            Assert.Contains("{OriginalFormat}", otlpLogRecord.Attributes.ToString());
-        }
+        Assert.Equal("Name", attribute.Key);
+        Assert.Equal("tomato", attribute.Value.StringValue);
 
-        [Fact]
-        public void CheckToOtlpLogRecordEventId()
+        attribute = otlpLogRecord.Attributes[++index];
+        Assert.Equal("Price", attribute.Key);
+        Assert.Equal(2.99, attribute.Value.DoubleValue);
+
+        attribute = otlpLogRecord.Attributes[++index];
+        Assert.Equal("{OriginalFormat}", attribute.Key);
+        Assert.Equal("Hello from {Name} {Price}.", attribute.Value.StringValue);
+    }
+
+    [Fact]
+    public void OtlpLogRecordSerializationDoesNotEnumerateAttributes()
+    {
+        var logRecord = new LogRecord
         {
-            List<LogRecord> logRecords = new List<LogRecord>();
-            using var loggerFactory = LoggerFactory.Create(builder =>
-            {
-                builder.AddOpenTelemetry(options =>
+            Attributes = new NonEnumerableReadOnlyList(
+                new KeyValuePair<string, object?>("key", "value")),
+        };
+
+        var otlpLogRecord = ToOtlpLogs(DefaultSdkLimitOptions, new ExperimentalOptions(), logRecord);
+
+        Assert.NotNull(otlpLogRecord);
+        Assert.Equal("value", TryGetAttribute(otlpLogRecord, "key")?.Value.StringValue);
+    }
+
+    [Theory]
+    [InlineData("true")]
+    [InlineData("false")]
+    [InlineData(null)]
+    public void CheckToOtlpLogRecordEventId(string? emitLogEventAttributes)
+    {
+        var logRecords = new List<LogRecord>();
+        using var loggerFactory = LoggerFactory.Create(builder =>
+        {
+            builder.UseOpenTelemetry(
+                logging => logging.AddInMemoryExporter(logRecords),
+                options =>
                 {
                     options.IncludeFormattedMessage = true;
                     options.ParseStateValues = true;
-                    options.AddInMemoryExporter(logRecords);
                 });
-            });
+        });
 
-            var logger = loggerFactory.CreateLogger("OtlpLogExporterTests");
-            logger.LogInformation(new EventId(10, null), "Hello from {name} {price}.", "tomato", 2.99);
-            Assert.Single(logRecords);
+        var logger = loggerFactory.CreateLogger("OtlpLogExporterTests");
+        logger.HelloFromWithEventId("tomato", 2.99);
 
-            var logRecord = logRecords[0];
-            var otlpLogRecord = logRecord.ToOtlpLog();
+        var configuration = new ConfigurationBuilder()
+          .AddInMemoryCollection(new Dictionary<string, string?> { [ExperimentalOptions.EmitLogEventEnvVar] = emitLogEventAttributes })
+          .Build();
 
-            Assert.NotNull(otlpLogRecord);
-            Assert.Equal("Hello from tomato 2.99.", otlpLogRecord.Body.StringValue);
+        var logRecord = Assert.Single(logRecords);
+        var otlpLogRecord = ToOtlpLogs(DefaultSdkLimitOptions, new(configuration), logRecord);
 
-            var otlpLogRecordAttributes = otlpLogRecord.Attributes.ToString();
+        Assert.NotNull(otlpLogRecord);
+        Assert.Equal("Hello from tomato 2.99.", otlpLogRecord.Body.StringValue);
 
-            // Event
-            Assert.Contains("Id", otlpLogRecordAttributes);
-            Assert.Contains("10", otlpLogRecordAttributes);
-
-            logRecords.Clear();
-
-            logger.LogInformation(new EventId(10, "MyEvent10"), "Hello from {name} {price}.", "tomato", 2.99);
-            Assert.Single(logRecords);
-
-            logRecord = logRecords[0];
-            otlpLogRecord = logRecord.ToOtlpLog();
-            Assert.NotNull(otlpLogRecord);
-            Assert.Equal("Hello from tomato 2.99.", otlpLogRecord.Body.StringValue);
-
-            otlpLogRecordAttributes = otlpLogRecord.Attributes.ToString();
-
-            // Event
-            Assert.Contains("Id", otlpLogRecordAttributes);
-            Assert.Contains("10", otlpLogRecordAttributes);
-            Assert.Contains("Name", otlpLogRecordAttributes);
-            Assert.Contains("MyEvent10", otlpLogRecordAttributes);
+        // Event
+        var otlpLogRecordAttributes = otlpLogRecord.Attributes.ToString();
+        if (emitLogEventAttributes == "true")
+        {
+            Assert.Contains(ExperimentalOptions.LogRecordEventIdAttribute, otlpLogRecordAttributes, StringComparison.Ordinal);
+            Assert.Contains("10", otlpLogRecordAttributes, StringComparison.Ordinal);
+        }
+        else
+        {
+            Assert.DoesNotContain(ExperimentalOptions.LogRecordEventIdAttribute, otlpLogRecordAttributes, StringComparison.Ordinal);
         }
 
-        [Fact]
-        public void CheckToOtlpLogRecordTraceIdSpanIdFlagWithNoActivity()
+        logRecords.Clear();
+
+        logger.HelloFromWithEventIdAndEventName("tomato", 2.99);
+
+        logRecord = Assert.Single(logRecords);
+
+        otlpLogRecord = ToOtlpLogs(DefaultSdkLimitOptions, new(configuration), logRecord);
+
+        Assert.NotNull(otlpLogRecord);
+        Assert.Equal("Hello from tomato 2.99.", otlpLogRecord.Body.StringValue);
+
+        Assert.Equal("MyEvent10", otlpLogRecord.EventName);
+
+        // Event
+        otlpLogRecordAttributes = otlpLogRecord.Attributes.ToString();
+        if (emitLogEventAttributes == "true")
         {
-            List<LogRecord> logRecords = new List<LogRecord>();
-            using var loggerFactory = LoggerFactory.Create(builder =>
-            {
-                builder.AddOpenTelemetry(options =>
-                {
-                    options.AddInMemoryExporter(logRecords);
-                });
-            });
+            Assert.Contains(ExperimentalOptions.LogRecordEventIdAttribute, otlpLogRecordAttributes, StringComparison.Ordinal);
+            Assert.Contains("10", otlpLogRecordAttributes, StringComparison.Ordinal);
+        }
+        else
+        {
+            Assert.DoesNotContain(ExperimentalOptions.LogRecordEventIdAttribute, otlpLogRecordAttributes, StringComparison.Ordinal);
+        }
+    }
 
-            var logger = loggerFactory.CreateLogger("OtlpLogExporterTests");
-            logger.LogInformation("Log when there is no activity.");
-            var logRecord = logRecords[0];
-            var otlpLogRecord = logRecord.ToOtlpLog();
+    [Fact]
+    public void CheckToOtlpLogRecordTimestamps()
+    {
+        var logRecords = new List<LogRecord>();
+        using var loggerFactory = LoggerFactory.Create(builder =>
+        {
+            builder.UseOpenTelemetry(logging => logging.AddInMemoryExporter(logRecords));
+        });
 
-            Assert.Null(Activity.Current);
-            Assert.True(otlpLogRecord.TraceId.IsEmpty);
-            Assert.True(otlpLogRecord.SpanId.IsEmpty);
-            Assert.True(otlpLogRecord.Flags == 0);
+        var logger = loggerFactory.CreateLogger("OtlpLogExporterTests");
+        logger.LogMessage();
+
+        var logRecord = logRecords[0];
+        var otlpLogRecord = ToOtlpLogs(DefaultSdkLimitOptions, new ExperimentalOptions(), logRecord);
+
+        Assert.NotNull(otlpLogRecord);
+        Assert.True(otlpLogRecord.TimeUnixNano > 0);
+        Assert.True(otlpLogRecord.ObservedTimeUnixNano > 0);
+    }
+
+    [Fact]
+    public void CheckToOtlpLogRecordTimestamps_LogsApi_UnsetTimestamp()
+    {
+        // When the Logs API caller leaves Timestamp as DateTime.MinValue
+        // (not set), the serializer must write:
+        //   time_unix_nano         = 0   (unknown/missing per OTLP spec)
+        //   observed_time_unix_nano >= the time of observation (MUST be set per OTLP spec)
+        var logRecords = new List<LogRecord>();
+        using var loggerProvider = Sdk.CreateLoggerProviderBuilder()
+            .AddInMemoryExporter(logRecords)
+            .Build();
+
+        var logger = loggerProvider.GetLogger("OtlpLogExporterTests");
+
+        // Capture a lower-bound for the observation timestamp before emitting.
+        var beforeEmitUtc = DateTime.UtcNow;
+
+        // Emit with default LogRecordData -- Timestamp stays DateTime.MinValue.
+        logger.EmitLog(new LogRecordData());
+
+        var singleLogRecord = Assert.Single(logRecords);
+        Assert.Equal(DateTime.MinValue, singleLogRecord.Timestamp);
+
+        var otlpLogRecord = ToOtlpLogs(DefaultSdkLimitOptions, new ExperimentalOptions(), singleLogRecord);
+
+        Assert.NotNull(otlpLogRecord);
+
+        // time_unix_nano must be 0 -- "unknown or missing" per OTLP spec.
+        Assert.Equal(0UL, otlpLogRecord.TimeUnixNano);
+
+        // observed_time_unix_nano must be >= the moment we captured before emitting.
+        var beforeEmitNano = (ulong)new DateTimeOffset(beforeEmitUtc).ToUnixTimeNanoseconds();
+        Assert.True(
+            otlpLogRecord.ObservedTimeUnixNano >= beforeEmitNano,
+            $"ObservedTimeUnixNano ({otlpLogRecord.ObservedTimeUnixNano}) should be >= beforeEmitNano ({beforeEmitNano})");
+    }
+
+    [Fact]
+    public void CheckToOtlpLogRecordTimestamps_LogsApi_DefaultData()
+    {
+        var logRecords = new List<LogRecord>();
+        using var loggerProvider = Sdk.CreateLoggerProviderBuilder()
+            .AddInMemoryExporter(logRecords)
+            .Build();
+
+        var logger = loggerProvider.GetLogger("OtlpLogExporterTests");
+
+        var beforeEmitUtc = DateTime.UtcNow;
+
+        logger.EmitLog(default);
+
+        var singleLogRecord = Assert.Single(logRecords);
+        Assert.Equal(DateTime.MinValue, singleLogRecord.Timestamp);
+        Assert.InRange(singleLogRecord.ObservedTimestamp, beforeEmitUtc, DateTime.UtcNow);
+
+        var otlpLogRecord = ToOtlpLogs(DefaultSdkLimitOptions, new ExperimentalOptions(), singleLogRecord);
+
+        Assert.NotNull(otlpLogRecord);
+        Assert.Equal(0UL, otlpLogRecord.TimeUnixNano);
+
+        var beforeEmitNano = (ulong)new DateTimeOffset(beforeEmitUtc).ToUnixTimeNanoseconds();
+        Assert.True(
+            otlpLogRecord.ObservedTimeUnixNano >= beforeEmitNano,
+            $"ObservedTimeUnixNano ({otlpLogRecord.ObservedTimeUnixNano}) should be >= beforeEmitNano ({beforeEmitNano})");
+    }
+
+    [Fact]
+    public void CheckToOtlpLogRecordTimestamps_LogsApi_TimestampSetObservedTimestampUnset()
+    {
+        var logRecords = new List<LogRecord>();
+        using var loggerProvider = Sdk.CreateLoggerProviderBuilder()
+            .AddInMemoryExporter(logRecords)
+            .Build();
+
+        var logger = loggerProvider.GetLogger("OtlpLogExporterTests");
+        var timestamp = new DateTime(2020, 1, 2, 3, 4, 5, DateTimeKind.Utc);
+        LogRecordData data = default;
+        data.Timestamp = timestamp;
+
+        var beforeEmitUtc = DateTime.UtcNow;
+
+        logger.EmitLog(data);
+
+        var logRecord = Assert.Single(logRecords);
+        Assert.Equal(timestamp, logRecord.Timestamp);
+        Assert.InRange(logRecord.ObservedTimestamp, beforeEmitUtc, DateTime.UtcNow);
+
+        var otlpLogRecord = ToOtlpLogs(DefaultSdkLimitOptions, new ExperimentalOptions(), logRecord);
+
+        Assert.NotNull(otlpLogRecord);
+        Assert.Equal((ulong)timestamp.ToUnixTimeNanoseconds(), otlpLogRecord.TimeUnixNano);
+
+        var beforeEmitNano = (ulong)new DateTimeOffset(beforeEmitUtc).ToUnixTimeNanoseconds();
+        Assert.True(
+            otlpLogRecord.ObservedTimeUnixNano >= beforeEmitNano,
+            $"ObservedTimeUnixNano ({otlpLogRecord.ObservedTimeUnixNano}) should be >= beforeEmitNano ({beforeEmitNano})");
+    }
+
+    [Fact]
+    public void CheckToOtlpLogRecordTraceIdSpanIdFlagWithNoActivity()
+    {
+        var logRecords = new List<LogRecord>();
+        using var loggerFactory = LoggerFactory.Create(builder =>
+        {
+            builder.UseOpenTelemetry(logging => logging.AddInMemoryExporter(logRecords));
+        });
+
+        var logger = loggerFactory.CreateLogger("OtlpLogExporterTests");
+        logger.LogWhenThereIsNoActivity();
+
+        var logRecord = logRecords[0];
+        var otlpLogRecord = ToOtlpLogs(DefaultSdkLimitOptions, new ExperimentalOptions(), logRecord);
+
+        Assert.Null(Activity.Current);
+        Assert.NotNull(otlpLogRecord);
+        Assert.True(otlpLogRecord.TraceId.IsEmpty);
+        Assert.True(otlpLogRecord.SpanId.IsEmpty);
+        Assert.Equal(0u, otlpLogRecord.Flags);
+    }
+
+    [Fact]
+    public void CheckToOtlpLogRecordSpanIdTraceIdAndFlag()
+    {
+        var logRecords = new List<LogRecord>();
+        using var loggerFactory = LoggerFactory.Create(builder =>
+        {
+            builder.UseOpenTelemetry(logging => logging.AddInMemoryExporter(logRecords));
+        });
+
+        var logger = loggerFactory.CreateLogger("OtlpLogExporterTests");
+
+        ActivityTraceId expectedTraceId = default;
+        ActivitySpanId expectedSpanId = default;
+        using (var activity = new Activity(Utils.GetCurrentMethodName()))
+        {
+            activity.Start();
+            logger.LogWithinAnActivity();
+
+            expectedTraceId = activity.TraceId;
+            expectedSpanId = activity.SpanId;
         }
 
-        [Fact]
-        public void CheckToOtlpLogRecordSpanIdTraceIdAndFlag()
+        var logRecord = logRecords[0];
+
+        var otlpLogRecord = ToOtlpLogs(DefaultSdkLimitOptions, new ExperimentalOptions(), logRecord);
+
+        Assert.NotNull(otlpLogRecord);
+        Assert.Equal(expectedTraceId.ToString(), ActivityTraceId.CreateFromBytes(otlpLogRecord.TraceId.ToByteArray()).ToString());
+        Assert.Equal(expectedSpanId.ToString(), ActivitySpanId.CreateFromBytes(otlpLogRecord.SpanId.ToByteArray()).ToString());
+        Assert.Equal((uint)logRecord.TraceFlags, otlpLogRecord.Flags);
+    }
+
+    [Fact]
+    public void CheckToOtlpLogRecordMasksReservedTraceFlagBits()
+    {
+        var logRecords = new List<LogRecord>();
+        using var loggerFactory = LoggerFactory.Create(builder =>
         {
-            List<LogRecord> logRecords = new List<LogRecord>();
-            using var loggerFactory = LoggerFactory.Create(builder =>
-            {
-                builder.AddOpenTelemetry(options =>
-                {
-                    options.AddInMemoryExporter(logRecords);
-                });
-            });
+            builder.UseOpenTelemetry(logging => logging.AddInMemoryExporter(logRecords));
+        });
 
-            var logger = loggerFactory.CreateLogger("OtlpLogExporterTests");
+        var logger = loggerFactory.CreateLogger("OtlpLogExporterTests");
 
-            ActivityTraceId expectedTraceId = default;
-            ActivitySpanId expectedSpanId = default;
-            using (var activity = new Activity(Utils.GetCurrentMethodName()).Start())
-            {
-                logger.LogInformation("Log within an activity.");
-
-                expectedTraceId = activity.TraceId;
-                expectedSpanId = activity.SpanId;
-            }
-
-            var logRecord = logRecords[0];
-            var otlpLogRecord = logRecord.ToOtlpLog();
-
-            Assert.Equal(expectedTraceId.ToString(), ActivityTraceId.CreateFromBytes(otlpLogRecord.TraceId.ToByteArray()).ToString());
-            Assert.Equal(expectedSpanId.ToString(), ActivitySpanId.CreateFromBytes(otlpLogRecord.SpanId.ToByteArray()).ToString());
-            Assert.Equal((uint)logRecord.TraceFlags, otlpLogRecord.Flags);
+        using (var activity = new Activity(Utils.GetCurrentMethodName()))
+        {
+            activity.Start();
+            logger.LogWithinAnActivity();
         }
 
-        [Fact]
-        public void CheckToOtlpLogRecordSeverityText()
+        var logRecord = Assert.Single(logRecords);
+        logRecord.TraceFlags = (ActivityTraceFlags)0x00000103;
+
+        var otlpLogRecord = ToOtlpLogs(DefaultSdkLimitOptions, new ExperimentalOptions(), logRecord);
+
+        Assert.NotNull(otlpLogRecord);
+        Assert.Equal(0x00000003u, otlpLogRecord.Flags);
+    }
+
+    [Theory]
+    [InlineData(LogLevel.Trace)]
+    [InlineData(LogLevel.Debug)]
+    [InlineData(LogLevel.Information)]
+    [InlineData(LogLevel.Warning)]
+    [InlineData(LogLevel.Error)]
+    [InlineData(LogLevel.Critical)]
+    public void CheckToOtlpLogRecordSeverityLevelAndText(LogLevel logLevel)
+    {
+        var logRecords = new List<LogRecord>();
+        using var loggerFactory = LoggerFactory.Create(builder =>
         {
-            List<LogRecord> logRecords = new List<LogRecord>();
-            using var loggerFactory = LoggerFactory.Create(builder =>
-            {
-                builder.AddOpenTelemetry(options =>
-                {
-                    options.AddInMemoryExporter(logRecords);
-                    options.IncludeFormattedMessage = true;
-                });
-            });
+            builder
+                .UseOpenTelemetry(
+                    logging => logging.AddInMemoryExporter(logRecords),
+                    options => options.IncludeFormattedMessage = true)
+                .AddFilter("CheckToOtlpLogRecordSeverityLevelAndText", LogLevel.Trace);
+        });
 
-            var logger = loggerFactory.CreateLogger("OtlpLogExporterTests");
-            logger.LogInformation("Hello from {name} {price}.", "tomato", 2.99);
-            Assert.Single(logRecords);
+        var logger = loggerFactory.CreateLogger("CheckToOtlpLogRecordSeverityLevelAndText");
+        logger.HelloFrom(logLevel, "tomato", 2.99);
 
-            var logRecord = logRecords[0];
-            var otlpLogRecord = logRecord.ToOtlpLog();
+        var logRecord = Assert.Single(logRecords);
+        var otlpLogRecord = ToOtlpLogs(DefaultSdkLimitOptions, new ExperimentalOptions(), logRecord);
 
-            Assert.NotNull(otlpLogRecord);
-            Assert.Equal(logRecord.LogLevel.ToString(), otlpLogRecord.SeverityText);
+        Assert.NotNull(otlpLogRecord);
+#pragma warning disable CS0618 // Type or member is obsolete
+        Assert.Equal(logRecord.LogLevel.ToString(), otlpLogRecord.SeverityText);
+#pragma warning restore CS0618 // Type or member is obsolete
+        Assert.NotNull(logRecord.Severity);
+        Assert.Equal((int)logRecord.Severity, (int)otlpLogRecord.SeverityNumber);
+        switch (logLevel)
+        {
+            case LogLevel.Trace:
+                Assert.Equal(OtlpLogs.SeverityNumber.Trace, otlpLogRecord.SeverityNumber);
+                break;
+            case LogLevel.Debug:
+                Assert.Equal(OtlpLogs.SeverityNumber.Debug, otlpLogRecord.SeverityNumber);
+                break;
+            case LogLevel.Information:
+                Assert.Equal(OtlpLogs.SeverityNumber.Info, otlpLogRecord.SeverityNumber);
+                break;
+            case LogLevel.Warning:
+                Assert.Equal(OtlpLogs.SeverityNumber.Warn, otlpLogRecord.SeverityNumber);
+                break;
+            case LogLevel.Error:
+                Assert.Equal(OtlpLogs.SeverityNumber.Error, otlpLogRecord.SeverityNumber);
+                break;
+            case LogLevel.Critical:
+                Assert.Equal(OtlpLogs.SeverityNumber.Fatal, otlpLogRecord.SeverityNumber);
+                break;
+            case LogLevel.None:
+            default:
+                break;
         }
+    }
 
-        [Fact]
-        public void CheckToOtlpLogRecordFormattedMessage()
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public void CheckToOtlpLogRecordBodyIsPopulated(bool includeFormattedMessage)
+    {
+        var logRecords = new List<LogRecord>();
+        using var loggerFactory = LoggerFactory.Create(builder =>
         {
-            List<LogRecord> logRecords = new List<LogRecord>();
-            using var loggerFactory = LoggerFactory.Create(builder =>
-            {
-                builder.AddOpenTelemetry(options =>
+            builder.UseOpenTelemetry(
+                logging => logging.AddInMemoryExporter(logRecords),
+                options =>
                 {
-                    options.AddInMemoryExporter(logRecords);
-                    options.IncludeFormattedMessage = true;
+                    options.IncludeFormattedMessage = includeFormattedMessage;
+                    options.ParseStateValues = true;
                 });
-            });
+        });
 
-            var logger = loggerFactory.CreateLogger("OtlpLogExporterTests");
-            logger.LogInformation("OpenTelemetry {Greeting} {Subject}!", "Hello", "World");
-            Assert.Single(logRecords);
+        var logger = loggerFactory.CreateLogger("OtlpLogExporterTests");
 
-            var logRecord = logRecords[0];
-            var otlpLogRecord = logRecord.ToOtlpLog();
+        // Scenario 1 - Using ExtensionMethods on ILogger.Log
+        logger.OpenTelemetryGreeting("Hello", "World");
 
-            Assert.NotNull(otlpLogRecord);
+        var logRecord = Assert.Single(logRecords);
+        var otlpLogRecord = ToOtlpLogs(DefaultSdkLimitOptions, new ExperimentalOptions(), logRecord);
+
+        Assert.NotNull(otlpLogRecord);
+        if (includeFormattedMessage)
+        {
             Assert.Equal(logRecord.FormattedMessage, otlpLogRecord.Body.StringValue);
         }
-
-        [Fact]
-        public void CheckToOtlpLogRecordExceptionAttributes()
+        else
         {
-            List<LogRecord> logRecords = new List<LogRecord>();
-            using var loggerFactory = LoggerFactory.Create(builder =>
+            Assert.Equal("OpenTelemetry {Greeting} {Subject}!", otlpLogRecord.Body.StringValue);
+        }
+
+        logRecords.Clear();
+
+        // Scenario 2 - Using the raw ILogger.Log Method
+        logger.Log(LogLevel.Information, default, "state", exception: null, (st, ex) => "Formatted Message");
+
+        logRecord = Assert.Single(logRecords);
+        otlpLogRecord = ToOtlpLogs(DefaultSdkLimitOptions, new ExperimentalOptions(), logRecord);
+
+        Assert.NotNull(otlpLogRecord);
+
+        // Formatter is always called if no template can be found.
+        Assert.Equal(logRecord.FormattedMessage, otlpLogRecord.Body.StringValue);
+        Assert.Equal(logRecord.Body, otlpLogRecord.Body.StringValue);
+
+        logRecords.Clear();
+
+        // Scenario 3 - Using the raw ILogger.Log Method, but with null
+        // formatter.
+        logger.Log(LogLevel.Information, default, "state", exception: null, formatter: null!);
+
+        logRecord = Assert.Single(logRecords);
+        otlpLogRecord = ToOtlpLogs(DefaultSdkLimitOptions, new ExperimentalOptions(), logRecord);
+
+        Assert.NotNull(otlpLogRecord);
+
+        // There is no formatter, we call ToString on state
+        Assert.Equal("state", otlpLogRecord.Body.StringValue);
+    }
+
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public void LogRecordBodyIsExportedWhenUsingLogsApi(bool isBodySet)
+    {
+        LogRecordAttributeList attributes = default;
+        attributes.Add("name", "tomato");
+        attributes.Add("price", 2.99);
+        attributes.Add("{OriginalFormat}", "Hello from {name} {price}.");
+
+        var logRecords = new List<LogRecord>();
+
+        using (var loggerProvider = Sdk.CreateLoggerProviderBuilder()
+            .AddInMemoryExporter(logRecords)
+            .Build())
+        {
+            var logger = loggerProvider.GetLogger();
+
+            logger.EmitLog(new LogRecordData()
             {
-                builder.AddOpenTelemetry(options =>
-                {
-                    options.AddInMemoryExporter(logRecords);
-                });
+                Body = isBodySet ? "Hello world" : null,
             });
 
-            var logger = loggerFactory.CreateLogger("OtlpLogExporterTests");
-            logger.LogInformation(new Exception("Exception Message"), "Exception Occurred");
-
-            var logRecord = logRecords[0];
-            var loggedException = logRecord.Exception;
-            var otlpLogRecord = logRecord.ToOtlpLog();
-
-            Assert.NotNull(otlpLogRecord);
-            var otlpLogRecordAttributes = otlpLogRecord.Attributes.ToString();
-            Assert.Contains(SemanticConventions.AttributeExceptionType, otlpLogRecordAttributes);
-            Assert.Contains(logRecord.Exception.GetType().Name, otlpLogRecordAttributes);
-
-            Assert.Contains(SemanticConventions.AttributeExceptionMessage, otlpLogRecordAttributes);
-            Assert.Contains(logRecord.Exception.Message, otlpLogRecordAttributes);
-
-            Assert.Contains(SemanticConventions.AttributeExceptionStacktrace, otlpLogRecordAttributes);
-            Assert.Contains(logRecord.Exception.ToInvariantString(), otlpLogRecordAttributes);
+            logger.EmitLog(new LogRecordData(), attributes);
         }
+
+        Assert.Equal(2, logRecords.Count);
+
+        var otlpLogRecord = ToOtlpLogs(DefaultSdkLimitOptions, new ExperimentalOptions(), logRecords[0]);
+
+        Assert.NotNull(otlpLogRecord);
+        if (isBodySet)
+        {
+            Assert.Equal("Hello world", otlpLogRecord.Body?.StringValue);
+        }
+        else
+        {
+            Assert.Null(otlpLogRecord.Body);
+        }
+
+        otlpLogRecord = ToOtlpLogs(DefaultSdkLimitOptions, new ExperimentalOptions(), logRecords[1]);
+
+        Assert.NotNull(otlpLogRecord);
+        Assert.Equal(2, otlpLogRecord.Attributes.Count);
+
+        var index = 0;
+        var attribute = otlpLogRecord.Attributes[index];
+        Assert.Equal("name", attribute.Key);
+        Assert.Equal("tomato", attribute.Value.StringValue);
+
+        attribute = otlpLogRecord.Attributes[++index];
+        Assert.Equal("price", attribute.Key);
+        Assert.Equal(2.99, attribute.Value.DoubleValue);
+
+        Assert.Equal("Hello from {name} {price}.", otlpLogRecord.Body.StringValue);
+    }
+
+    [Fact]
+    public void CheckToOtlpLogRecordExceptionAttributes()
+    {
+        var logRecords = new List<LogRecord>();
+        using var loggerFactory = LoggerFactory.Create(builder =>
+        {
+            builder.UseOpenTelemetry(logging => logging.AddInMemoryExporter(logRecords));
+        });
+
+        var logger = loggerFactory.CreateLogger("OtlpLogExporterTests");
+        logger.ExceptionOccurred(new InvalidOperationException("Exception Message"));
+
+        var logRecord = logRecords[0];
+        var loggedException = logRecord.Exception;
+
+        var otlpLogRecord = ToOtlpLogs(DefaultSdkLimitOptions, new ExperimentalOptions(), logRecord);
+
+        Assert.NotNull(otlpLogRecord);
+        var otlpLogRecordAttributes = otlpLogRecord.Attributes.ToString();
+
+        Assert.Contains(SemanticConventions.AttributeExceptionType, otlpLogRecordAttributes, StringComparison.Ordinal);
+        Assert.NotNull(logRecord.Exception);
+        Assert.Contains(logRecord.Exception.GetType().Name, otlpLogRecordAttributes, StringComparison.Ordinal);
+
+        Assert.Contains(SemanticConventions.AttributeExceptionMessage, otlpLogRecordAttributes, StringComparison.Ordinal);
+        Assert.Contains(logRecord.Exception.Message, otlpLogRecordAttributes, StringComparison.Ordinal);
+
+        Assert.Contains(SemanticConventions.AttributeExceptionStacktrace, otlpLogRecordAttributes, StringComparison.Ordinal);
+        Assert.Contains(logRecord.Exception.ToInvariantString(), otlpLogRecordAttributes, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void CheckToOtlpLogRecordAttributeWithThrowingToStringIsDropped()
+    {
+        // An attribute whose value cannot be serialized must be left out of the payload
+        // entirely and counted as dropped - not written as an empty KeyValue.
+        LogRecordAttributeList attributes = default;
+        attributes.Add("GoodTag", "value");
+        attributes.Add("ThrowingTag", new ToStringThrows());
+
+        var logRecords = new List<LogRecord>();
+        using var loggerProvider = Sdk.CreateLoggerProviderBuilder()
+            .AddInMemoryExporter(logRecords)
+            .Build();
+
+        var logger = loggerProvider.GetLogger("OtlpLogExporterTests");
+        logger.EmitLog(new LogRecordData(), attributes);
+
+        var singleLogRecord = Assert.Single(logRecords);
+
+        var otlpLogRecord = ToOtlpLogs(DefaultSdkLimitOptions, new ExperimentalOptions(), singleLogRecord);
+
+        Assert.NotNull(otlpLogRecord);
+        Assert.Equal(1u, otlpLogRecord.DroppedAttributesCount);
+
+        var attribute = Assert.Single(otlpLogRecord.Attributes);
+        Assert.Equal("GoodTag", attribute.Key);
+        Assert.Equal("value", attribute.Value.StringValue);
+        Assert.Equal(1u, otlpLogRecord.DroppedAttributesCount);
+    }
+
+    [Fact]
+    public void CheckToOtlpLogRecordRespectsAttributeLimits()
+    {
+        var sdkLimitOptions = new SdkLimitOptions
+        {
+            AttributeCountLimit = 2,
+            AttributeValueLengthLimit = 8,
+        };
+
+        var logRecords = new List<LogRecord>();
+        using var loggerFactory = LoggerFactory.Create(builder =>
+        {
+            builder.UseOpenTelemetry(
+                logging => logging.AddInMemoryExporter(logRecords),
+                options => options.ParseStateValues = true);
+        });
+
+        var logger = loggerFactory.CreateLogger(string.Empty);
+        logger.OpenTelemetryWithAttributes("I'm an attribute", "I too am an attribute", "I get dropped :(");
+
+        var logRecord = logRecords[0];
+        var otlpLogRecord = ToOtlpLogs(sdkLimitOptions, new(), logRecord);
+
+        Assert.NotNull(otlpLogRecord);
+        Assert.Equal(1u, otlpLogRecord.DroppedAttributesCount);
+
+        var attribute = TryGetAttribute(otlpLogRecord, "AttributeOne");
+        Assert.NotNull(attribute);
+
+        // "I'm an a" == first 8 chars from the first attribute "I'm an attribute"
+        Assert.Equal("I'm an a", attribute.Value.StringValue);
+        attribute = TryGetAttribute(otlpLogRecord, "AttributeTwo");
+        Assert.NotNull(attribute);
+
+        // "I too am" == first 8 chars from the second attribute "I too am an attribute"
+        Assert.Equal("I too am", attribute.Value.StringValue);
+
+        attribute = TryGetAttribute(otlpLogRecord, "AttributeThree");
+        Assert.Null(attribute);
+    }
+
+    [Fact]
+    public void ByteArrayLogRecordAttributeIsTruncatedToValueLengthLimit()
+    {
+        var sdkLimitOptions = new SdkLimitOptions { AttributeValueLengthLimit = 4 };
+
+        var logRecords = new List<LogRecord>();
+        using var loggerFactory = LoggerFactory.Create(builder =>
+        {
+            builder.UseOpenTelemetry(
+                logging => logging.AddInMemoryExporter(logRecords),
+                options => options.ParseStateValues = true);
+        });
+
+        var logger = loggerFactory.CreateLogger(string.Empty);
+        var state = new List<KeyValuePair<string, object?>> { new("Bytes", new byte[] { 1, 2, 3, 4, 5, 6 }) };
+        logger.Log(
+            LogLevel.Information,
+            default,
+            state,
+            null,
+            (s, _) => "message");
+
+        var otlpLogRecord = ToOtlpLogs(sdkLimitOptions, new(), logRecords[0]);
+
+        Assert.NotNull(otlpLogRecord);
+        var attribute = TryGetAttribute(otlpLogRecord, "Bytes");
+        Assert.NotNull(attribute);
+        Assert.Equal([1, 2, 3, 4], attribute.Value.BytesValue.ToByteArray());
+    }
+
+    [Fact]
+    public void Export_WhenExportClientIsProvidedInCtor_UsesProvidedExportClient()
+    {
+        // Arrange.
+        var testExportClient = new TestExportClient();
+        var exporterOptions = new OtlpExporterOptions();
+        using var transmissionHandler = new OtlpExporterTransmissionHandler(testExportClient, exporterOptions.TimeoutMilliseconds);
+        var emptyLogRecords = Array.Empty<LogRecord>();
+        var emptyBatch = new Batch<LogRecord>(emptyLogRecords, emptyLogRecords.Length);
+        using var sut = new OtlpLogExporter(
+            exporterOptions,
+            new SdkLimitOptions(),
+            new ExperimentalOptions(),
+            transmissionHandler);
+
+        // Act.
+        sut.Export(emptyBatch);
+
+        // Assert.
+        Assert.True(testExportClient.SendExportRequestCalled);
+    }
+
+    [Fact]
+    public void Export_ProcessorTimeoutShorterThanExporterTimeout_LimitsExportDeadline()
+    {
+        // Arrange
+        var testExportClient = new TestExportClient();
+        var exporterOptions = new OtlpExporterOptions();
+        using var transmissionHandler = new OtlpExporterTransmissionHandler(testExportClient, exporterOptions.TimeoutMilliseconds);
+#pragma warning disable CA2000 // Dispose objects before losing scope
+        using var processor = new BatchLogRecordExportProcessor(
+            new OtlpLogExporter(
+                exporterOptions,
+                new SdkLimitOptions(),
+                new ExperimentalOptions(),
+                transmissionHandler),
+            exporterTimeoutMilliseconds: 500);
+#pragma warning restore CA2000 // Dispose objects before losing scope
+
+        // Act
+        var before = DateTime.UtcNow;
+        processor.OnEnd(new LogRecord());
+        Assert.True(processor.ForceFlush());
+        var after = DateTime.UtcNow;
+
+        // Assert
+        Assert.True(testExportClient.SendExportRequestCalled);
+        Assert.InRange(testExportClient.LastDeadlineUtc, before.AddMilliseconds(500), after.AddMilliseconds(500));
+    }
+
+    [Fact]
+    public void Export_WhenExportClientThrowsException_ReturnsExportResultFailure()
+    {
+        // Arrange.
+        var testExportClient = new TestExportClient(throwException: true);
+        var exporterOptions = new OtlpExporterOptions();
+        using var transmissionHandler = new OtlpExporterTransmissionHandler(testExportClient, exporterOptions.TimeoutMilliseconds);
+        var emptyLogRecords = Array.Empty<LogRecord>();
+        var emptyBatch = new Batch<LogRecord>(emptyLogRecords, emptyLogRecords.Length);
+        using var sut = new OtlpLogExporter(
+            exporterOptions,
+            new SdkLimitOptions(),
+            new ExperimentalOptions(),
+            transmissionHandler);
+
+        // Act.
+        var result = sut.Export(emptyBatch);
+
+        // Assert.
+        Assert.Equal(ExportResult.Failure, result);
+    }
+
+    [Fact]
+    public void Export_WhenSerializationFails_ReportsDroppedBatchAndDoesNotSubmitRequest()
+    {
+        const int BatchDroppedEventId = 39;
+        const int ExportMethodExceptionEventId = 4;
+
+        // Arrange.
+        using var listener = new TestEventListener(OpenTelemetryProtocolExporterEventSource.Log, EventLevel.Error);
+
+        var testExportClient = new TestExportClient();
+        var exporterOptions = new OtlpExporterOptions();
+        using var transmissionHandler = new OtlpExporterTransmissionHandler(testExportClient, exporterOptions.TimeoutMilliseconds);
+        using var sut = new OtlpLogExporter(
+            exporterOptions,
+            new SdkLimitOptions(),
+            new ExperimentalOptions(),
+            transmissionHandler);
+
+        // A null item is a stand-in for any exception escaping the
+        // serializer. The failures which can reach here in practice, and the
+        // serializer state left behind by them, are covered by
+        // ProtobufOtlpSerializerExceptionSafetyTests.
+        var batch = new Batch<LogRecord>([null!], 1);
+
+        // Act.
+        var result = sut.Export(batch);
+
+        // Assert.
+        Assert.Equal(ExportResult.Failure, result);
+        Assert.False(testExportClient.SendExportRequestCalled);
+
+        var droppedEvent = Assert.Single(listener.Messages, e => e.EventId == BatchDroppedEventId);
+        Assert.NotNull(droppedEvent.Payload);
+        Assert.Equal("Logs", droppedEvent.Payload[0]);
+        Assert.Equal(1L, droppedEvent.Payload[1]);
+        Assert.Contains(nameof(NullReferenceException), Assert.IsType<string>(droppedEvent.Payload[2]), StringComparison.Ordinal);
+
+        // The batch has been attributed to a signal and an item count, so it must
+        // not also be reported as an unknown export error.
+        Assert.DoesNotContain(listener.Messages, e => e.EventId == ExportMethodExceptionEventId);
+    }
+
+    [Fact]
+    public void Export_WhenExportIsSuccessful_ReturnsExportResultSuccess()
+    {
+        // Arrange.
+        var testExportClient = new TestExportClient();
+        var exporterOptions = new OtlpExporterOptions();
+        using var transmissionHandler = new OtlpExporterTransmissionHandler(testExportClient, exporterOptions.TimeoutMilliseconds);
+        var emptyLogRecords = Array.Empty<LogRecord>();
+        var emptyBatch = new Batch<LogRecord>(emptyLogRecords, emptyLogRecords.Length);
+        using var sut = new OtlpLogExporter(
+            exporterOptions,
+            new SdkLimitOptions(),
+            new ExperimentalOptions(),
+            transmissionHandler);
+
+        // Act.
+        var result = sut.Export(emptyBatch);
+
+        // Assert.
+        Assert.Equal(ExportResult.Success, result);
+    }
+
+    [Fact]
+    public void ToOtlpLog_WhenOptionsIncludeScopesIsFalse_DoesNotContainScopeAttribute()
+    {
+        // Arrange.
+        var logRecords = new List<LogRecord>(1);
+        using var loggerFactory = LoggerFactory.Create(builder =>
+        {
+            builder.UseOpenTelemetry(
+                logging => logging.AddInMemoryExporter(logRecords),
+                options => options.IncludeScopes = false);
+        });
+        var logger = loggerFactory.CreateLogger("Some category");
+
+        const string expectedScopeKey = "Some scope key";
+        const string expectedScopeValue = "Some scope value";
+
+        // Act.
+        using (logger.BeginScope(new List<KeyValuePair<string, object>>
+        {
+            new(expectedScopeKey, expectedScopeValue),
+        }))
+        {
+            logger.SomeLogInformation();
+        }
+
+        // Assert.
+        var logRecord = logRecords.Single();
+        var otlpLogRecord = ToOtlpLogs(DefaultSdkLimitOptions, new ExperimentalOptions(), logRecord);
+
+        Assert.NotNull(otlpLogRecord);
+        var actualScope = TryGetAttribute(otlpLogRecord, expectedScopeKey);
+        Assert.Null(actualScope);
+    }
+
+    [Theory]
+    [InlineData("Some scope value")]
+    [InlineData('a')]
+    public void ToOtlpLog_WhenOptionsIncludeScopesIsTrue_ContainsScopeAttributeStringValue(object scopeValue)
+    {
+#if NET
+        Assert.NotNull(scopeValue);
+#else
+        if (scopeValue == null)
+        {
+            throw new ArgumentNullException(nameof(scopeValue));
+        }
+#endif
+
+        // Arrange.
+        var logRecords = new List<LogRecord>(1);
+        using var loggerFactory = LoggerFactory.Create(builder =>
+        {
+            builder.UseOpenTelemetry(
+                logging => logging.AddInMemoryExporter(logRecords),
+                options => options.IncludeScopes = true);
+        });
+        var logger = loggerFactory.CreateLogger(nameof(OtlpLogExporterTests));
+
+        const string scopeKey = "Some scope key";
+
+        // Act.
+        using (logger.BeginScope(new List<KeyValuePair<string, object>>
+        {
+            new(scopeKey, scopeValue),
+        }))
+        {
+            logger.SomeLogInformation();
+        }
+
+        // Assert.
+        var logRecord = logRecords.Single();
+        var otlpLogRecord = ToOtlpLogs(DefaultSdkLimitOptions, new ExperimentalOptions(), logRecord);
+
+        Assert.NotNull(otlpLogRecord);
+        Assert.Single(otlpLogRecord.Attributes);
+        var actualScope = TryGetAttribute(otlpLogRecord, scopeKey);
+        Assert.NotNull(actualScope);
+        Assert.Equal(scopeKey, actualScope.Key);
+        Assert.Equal(ValueOneofCase.StringValue, actualScope.Value.ValueCase);
+        Assert.Equal(scopeValue.ToString(), actualScope.Value.StringValue);
+    }
+
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public void ToOtlpLog_WhenOptionsIncludeScopesIsTrue_ContainsScopeAttributeBoolValue(bool scopeValue)
+    {
+        // Arrange.
+        var logRecords = new List<LogRecord>(1);
+        using var loggerFactory = LoggerFactory.Create(builder =>
+        {
+            builder.UseOpenTelemetry(
+                logging => logging.AddInMemoryExporter(logRecords),
+                options => options.IncludeScopes = true);
+        });
+        var logger = loggerFactory.CreateLogger(nameof(OtlpLogExporterTests));
+
+        const string scopeKey = "Some scope key";
+
+        // Act.
+        using (logger.BeginScope(new List<KeyValuePair<string, object>>
+        {
+            new(scopeKey, scopeValue),
+        }))
+        {
+            logger.SomeLogInformation();
+        }
+
+        // Assert.
+        var logRecord = logRecords.Single();
+        var otlpLogRecord = ToOtlpLogs(DefaultSdkLimitOptions, new ExperimentalOptions(), logRecord);
+
+        Assert.NotNull(otlpLogRecord);
+        Assert.Single(otlpLogRecord.Attributes);
+        var actualScope = TryGetAttribute(otlpLogRecord, scopeKey);
+        Assert.NotNull(actualScope);
+        Assert.Equal(scopeKey, actualScope.Key);
+        Assert.Equal(ValueOneofCase.BoolValue, actualScope.Value.ValueCase);
+        Assert.Equal(scopeValue.ToString(), actualScope.Value.BoolValue.ToString());
+    }
+
+    [Theory]
+    [InlineData(byte.MinValue)]
+    [InlineData(byte.MaxValue)]
+    [InlineData(sbyte.MinValue)]
+    [InlineData(sbyte.MaxValue)]
+    [InlineData(short.MinValue)]
+    [InlineData(short.MaxValue)]
+    [InlineData(ushort.MinValue)]
+    [InlineData(ushort.MaxValue)]
+    [InlineData(int.MinValue)]
+    [InlineData(int.MaxValue)]
+    [InlineData(uint.MinValue)]
+    [InlineData(uint.MaxValue)]
+    [InlineData(long.MinValue)]
+    [InlineData(long.MaxValue)]
+    public void ToOtlpLog_WhenOptionsIncludeScopesIsTrue_ContainsScopeAttributeIntValue(object scopeValue)
+    {
+#if NET
+        Assert.NotNull(scopeValue);
+#else
+        if (scopeValue == null)
+        {
+            throw new ArgumentNullException(nameof(scopeValue));
+        }
+#endif
+
+        // Arrange.
+        var logRecords = new List<LogRecord>(1);
+        using var loggerFactory = LoggerFactory.Create(builder =>
+        {
+            builder.UseOpenTelemetry(
+                logging => logging.AddInMemoryExporter(logRecords),
+                options => options.IncludeScopes = true);
+        });
+        var logger = loggerFactory.CreateLogger(nameof(OtlpLogExporterTests));
+
+        const string scopeKey = "Some scope key";
+
+        // Act.
+        using (logger.BeginScope(new List<KeyValuePair<string, object>>
+        {
+            new(scopeKey, scopeValue),
+        }))
+        {
+            logger.SomeLogInformation();
+        }
+
+        // Assert.
+        var logRecord = logRecords.Single();
+        var otlpLogRecord = ToOtlpLogs(DefaultSdkLimitOptions, new ExperimentalOptions(), logRecord);
+
+        Assert.NotNull(otlpLogRecord);
+        Assert.Single(otlpLogRecord.Attributes);
+        var actualScope = TryGetAttribute(otlpLogRecord, scopeKey);
+        Assert.NotNull(actualScope);
+        Assert.Equal(scopeKey, actualScope.Key);
+        Assert.Equal(ValueOneofCase.IntValue, actualScope.Value.ValueCase);
+        Assert.Equal(scopeValue.ToString(), actualScope.Value.IntValue.ToString(CultureInfo.InvariantCulture));
+    }
+
+    [Theory]
+    [InlineData(float.MinValue)]
+    [InlineData(float.MaxValue)]
+    public void ToOtlpLog_WhenOptionsIncludeScopesIsTrue_ContainsScopeAttributeDoubleValueForFloat(float scopeValue)
+    {
+        // Arrange.
+        var logRecords = new List<LogRecord>(1);
+        using var loggerFactory = LoggerFactory.Create(builder =>
+        {
+            builder.UseOpenTelemetry(
+                logging => logging.AddInMemoryExporter(logRecords),
+                options => options.IncludeScopes = true);
+        });
+        var logger = loggerFactory.CreateLogger(nameof(OtlpLogExporterTests));
+
+        const string scopeKey = "Some scope key";
+
+        // Act.
+        using (logger.BeginScope(new List<KeyValuePair<string, object>>
+        {
+            new(scopeKey, scopeValue),
+        }))
+        {
+            logger.SomeLogInformation();
+        }
+
+        // Assert.
+        var logRecord = logRecords.Single();
+
+        var otlpLogRecord = ToOtlpLogs(DefaultSdkLimitOptions, new ExperimentalOptions(), logRecord);
+
+        Assert.NotNull(otlpLogRecord);
+        Assert.Single(otlpLogRecord.Attributes);
+        var actualScope = TryGetAttribute(otlpLogRecord, scopeKey);
+        Assert.NotNull(actualScope);
+        Assert.Equal(scopeKey, actualScope.Key);
+        Assert.Equal(ValueOneofCase.DoubleValue, actualScope.Value.ValueCase);
+        Assert.Equal(scopeValue, actualScope.Value.DoubleValue);
+    }
+
+    [Theory]
+    [InlineData(double.MinValue)]
+    [InlineData(double.MaxValue)]
+    public void ToOtlpLog_WhenOptionsIncludeScopesIsTrue_ContainsScopeAttributeDoubleValueForDouble(double scopeValue)
+    {
+        // Arrange.
+        var logRecords = new List<LogRecord>(1);
+        using var loggerFactory = LoggerFactory.Create(builder =>
+        {
+            builder.UseOpenTelemetry(
+                logging => logging.AddInMemoryExporter(logRecords),
+                options => options.IncludeScopes = true);
+        });
+        var logger = loggerFactory.CreateLogger(nameof(OtlpLogExporterTests));
+
+        const string scopeKey = "Some scope key";
+
+        // Act.
+        using (logger.BeginScope(new List<KeyValuePair<string, object>>
+        {
+            new(scopeKey, scopeValue),
+        }))
+        {
+            logger.SomeLogInformation();
+        }
+
+        // Assert.
+        var logRecord = logRecords.Single();
+        var otlpLogRecord = ToOtlpLogs(DefaultSdkLimitOptions, new ExperimentalOptions(), logRecord);
+
+        Assert.NotNull(otlpLogRecord);
+        Assert.Single(otlpLogRecord.Attributes);
+        var actualScope = TryGetAttribute(otlpLogRecord, scopeKey);
+        Assert.NotNull(actualScope);
+        Assert.Equal(scopeKey, actualScope.Key);
+        Assert.Equal(scopeValue, actualScope.Value.DoubleValue);
+    }
+
+    [Fact]
+    public void ToOtlpLog_WhenOptionsIncludeScopesIsTrue_AndScopeStateIsOfTypeString_ScopeIsIgnored()
+    {
+        // Arrange.
+        var logRecords = new List<LogRecord>(1);
+        using var loggerFactory = LoggerFactory.Create(builder =>
+        {
+            builder.UseOpenTelemetry(
+                logging => logging.AddInMemoryExporter(logRecords),
+                options => options.IncludeScopes = true);
+        });
+        var logger = loggerFactory.CreateLogger(nameof(OtlpLogExporterTests));
+
+        const string scopeState = "Some scope state";
+
+        // Act.
+        using (logger.BeginScope(scopeState))
+        {
+            logger.SomeLogInformation();
+        }
+
+        // Assert.
+        var logRecord = logRecords.Single();
+        var otlpLogRecord = ToOtlpLogs(DefaultSdkLimitOptions, new ExperimentalOptions(), logRecord);
+
+        Assert.NotNull(otlpLogRecord);
+        Assert.Empty(otlpLogRecord.Attributes);
+    }
+
+    [Theory]
+    [InlineData(typeof(int))]
+    [InlineData(typeof(float))]
+    [InlineData(typeof(decimal))]
+    [InlineData(typeof(char))]
+    [InlineData(typeof(bool))]
+    public void ToOtlpLog_WhenOptionsIncludeScopesIsTrue_AndScopeStateIsOfPrimitiveTypes_ScopeIsIgnored(Type typeOfScopeState)
+    {
+        // Arrange.
+        var logRecords = new List<LogRecord>(1);
+        using var loggerFactory = LoggerFactory.Create(builder =>
+        {
+            builder.UseOpenTelemetry(
+                logging => logging.AddInMemoryExporter(logRecords),
+                options => options.IncludeScopes = true);
+        });
+        var logger = loggerFactory.CreateLogger(nameof(OtlpLogExporterTests));
+
+        var scopeState = Activator.CreateInstance(typeOfScopeState);
+        Assert.NotNull(scopeState);
+
+        // Act.
+        using (logger.BeginScope(scopeState))
+        {
+            logger.SomeLogInformation();
+        }
+
+        // Assert.
+        var logRecord = logRecords.Single();
+        var otlpLogRecord = ToOtlpLogs(DefaultSdkLimitOptions, new ExperimentalOptions(), logRecord);
+
+        Assert.NotNull(otlpLogRecord);
+        Assert.Empty(otlpLogRecord.Attributes);
+    }
+
+    [Fact]
+    public void ToOtlpLog_WhenOptionsIncludeScopesIsTrue_AndScopeStateIsOfDictionaryType_ScopeIsProcessed()
+    {
+        // Arrange.
+        var logRecords = new List<LogRecord>(1);
+        using var loggerFactory = LoggerFactory.Create(builder =>
+        {
+            builder.UseOpenTelemetry(
+                logging => logging.AddInMemoryExporter(logRecords),
+                options => options.IncludeScopes = true);
+        });
+        var logger = loggerFactory.CreateLogger(nameof(OtlpLogExporterTests));
+
+        const string scopeKey = "Some scope key";
+        const string scopeValue = "Some scope value";
+        var scopeState = new Dictionary<string, object>() { { scopeKey, scopeValue } };
+
+        // Act.
+        using (logger.BeginScope(scopeState))
+        {
+            logger.SomeLogInformation();
+        }
+
+        // Assert.
+        var logRecord = logRecords.Single();
+        var otlpLogRecord = ToOtlpLogs(DefaultSdkLimitOptions, new ExperimentalOptions(), logRecord);
+
+        Assert.NotNull(otlpLogRecord);
+        Assert.Single(otlpLogRecord.Attributes);
+        var actualScope = TryGetAttribute(otlpLogRecord, scopeKey);
+        Assert.NotNull(actualScope);
+        Assert.Equal(scopeKey, actualScope.Key);
+        Assert.Equal(scopeValue, actualScope.Value.StringValue);
+    }
+
+    [Theory]
+    [InlineData(typeof(List<KeyValuePair<string, object>>))]
+    [InlineData(typeof(ReadOnlyCollection<KeyValuePair<string, object>>))]
+    [InlineData(typeof(HashSet<KeyValuePair<string, object>>))]
+    public void ToOtlpLog_WhenOptionsIncludeScopesIsTrue_AndScopeStateIsOfEnumerableType_ScopeIsProcessed(Type typeOfScopeState)
+    {
+        // Arrange.
+        var logRecords = new List<LogRecord>(1);
+        using var loggerFactory = LoggerFactory.Create(builder =>
+        {
+            builder.UseOpenTelemetry(
+                logging => logging.AddInMemoryExporter(logRecords),
+                options => options.IncludeScopes = true);
+        });
+        var logger = loggerFactory.CreateLogger(nameof(OtlpLogExporterTests));
+
+        const string scopeKey = "Some scope key";
+        const string scopeValue = "Some scope value";
+        var scopeValues = new List<KeyValuePair<string, object?>> { new(scopeKey, scopeValue) };
+        var scopeState = Activator.CreateInstance(typeOfScopeState, scopeValues) as ICollection<KeyValuePair<string, object>>;
+
+        // Act.
+        Assert.NotNull(scopeState);
+        using (logger.BeginScope(scopeState))
+        {
+            logger.SomeLogInformation();
+        }
+
+        // Assert.
+        var logRecord = logRecords.Single();
+        var otlpLogRecord = ToOtlpLogs(DefaultSdkLimitOptions, new ExperimentalOptions(), logRecord);
+
+        Assert.NotNull(otlpLogRecord);
+        Assert.Single(otlpLogRecord.Attributes);
+        var actualScope = TryGetAttribute(otlpLogRecord, scopeKey);
+        Assert.NotNull(actualScope);
+        Assert.Equal(scopeKey, actualScope.Key);
+        Assert.Equal(scopeValue, actualScope.Value.StringValue);
+    }
+
+    [Theory]
+    [InlineData("Same scope key", "Same scope key")]
+    [InlineData("Scope key 1", "Scope key 2")]
+    public void ToOtlpLog_WhenOptionsIncludeScopesIsTrue_AndMultipleScopesAreAdded_ContainsAllAddedScopeValues(string scopeKey1, string scopeKey2)
+    {
+        // Arrange.
+        var logRecords = new List<LogRecord>(1);
+        using var loggerFactory = LoggerFactory.Create(builder =>
+        {
+            builder.UseOpenTelemetry(
+                logging => logging.AddInMemoryExporter(logRecords),
+                options => options.IncludeScopes = true);
+        });
+        var logger = loggerFactory.CreateLogger(nameof(OtlpLogExporterTests));
+
+        const string scopeValue1 = "Some scope value";
+        const string scopeValue2 = "Some other scope value";
+
+        // Act.
+        using (logger.BeginScope(new List<KeyValuePair<string, object>>
+        {
+            new(scopeKey1, scopeValue1),
+            new(scopeKey2, scopeValue2),
+        }))
+        {
+            logger.SomeLogInformation();
+        }
+
+        // Assert.
+        var logRecord = logRecords.Single();
+        var otlpLogRecord = ToOtlpLogs(DefaultSdkLimitOptions, new ExperimentalOptions(), logRecord);
+
+        Assert.NotNull(otlpLogRecord);
+        var allScopeValues = otlpLogRecord.Attributes
+            .Where(_ => _.Key == scopeKey1 || _.Key == scopeKey2)
+            .Select(_ => _.Value.StringValue);
+        Assert.Equal(2, otlpLogRecord.Attributes.Count);
+        Assert.Equal(2, allScopeValues.Count());
+        Assert.Contains(scopeValue1, allScopeValues);
+        Assert.Contains(scopeValue2, allScopeValues);
+    }
+
+    [Theory]
+    [InlineData("Same scope key", "Same scope key")]
+    [InlineData("Scope key 1", "Scope key 2")]
+    public void ToOtlpLog_WhenOptionsIncludeScopesIsTrue_AndMultipleScopeLevelsAreAdded_ContainsAllAddedScopeValues(string scopeKey1, string scopeKey2)
+    {
+        // Arrange.
+        var logRecords = new List<LogRecord>(1);
+        using var loggerFactory = LoggerFactory.Create(builder =>
+        {
+            builder.UseOpenTelemetry(
+                logging => logging.AddInMemoryExporter(logRecords),
+                options => options.IncludeScopes = true);
+        });
+        var logger = loggerFactory.CreateLogger(nameof(OtlpLogExporterTests));
+
+        const string scopeValue1 = "Some scope value";
+        const string scopeValue2 = "Some other scope value";
+
+        // Act.
+        using (logger.BeginScope(new List<KeyValuePair<string, object>> { new(scopeKey1, scopeValue1) }))
+        {
+            using (logger.BeginScope(new List<KeyValuePair<string, object>> { new(scopeKey2, scopeValue2) }))
+            {
+                logger.SomeLogInformation();
+            }
+        }
+
+        // Assert.
+        var logRecord = logRecords.Single();
+        var otlpLogRecord = ToOtlpLogs(DefaultSdkLimitOptions, new ExperimentalOptions(), logRecord);
+
+        Assert.NotNull(otlpLogRecord);
+        var allScopeValues = otlpLogRecord.Attributes
+            .Where(_ => _.Key == scopeKey1 || _.Key == scopeKey2)
+            .Select(_ => _.Value.StringValue);
+        Assert.Equal(2, otlpLogRecord.Attributes.Count);
+        Assert.Equal(2, allScopeValues.Count());
+        Assert.Contains(scopeValue1, allScopeValues);
+        Assert.Contains(scopeValue2, allScopeValues);
+    }
+
+    [Fact]
+    public void ToOtlpLog_WhenScopeKeyIsNull_IgnoresScopeItem()
+    {
+        var logRecords = new List<LogRecord>(1);
+        using var loggerFactory = LoggerFactory.Create(builder =>
+        {
+            builder.UseOpenTelemetry(
+                logging => logging.AddInMemoryExporter(logRecords),
+                options => options.IncludeScopes = true);
+        });
+        var logger = loggerFactory.CreateLogger(nameof(OtlpLogExporterTests));
+
+        using (logger.BeginScope(new List<KeyValuePair<string, object?>> { new(null!, "Some scope value") }))
+        {
+            logger.SomeLogInformation();
+        }
+
+        var logRecord = logRecords.Single();
+
+        var otlpLogRecord = ToOtlpLogs(DefaultSdkLimitOptions, new ExperimentalOptions(), logRecord);
+
+        Assert.NotNull(otlpLogRecord);
+        Assert.Empty(otlpLogRecord.Attributes);
+    }
+
+    [Theory]
+    [InlineData("Same scope key", "Same scope key")]
+    [InlineData("Scope key 1", "Scope key 2")]
+    public void ToOtlpLog_WhenOptionsIncludeScopesIsTrue_AndScopeIsUsedInLogMethod_ContainsAllAddedScopeValues(string scopeKey1, string scopeKey2)
+    {
+        // Arrange.
+        var logRecords = new List<LogRecord>(1);
+        using var loggerFactory = LoggerFactory.Create(builder =>
+        {
+            builder.UseOpenTelemetry(
+                logging => logging.AddInMemoryExporter(logRecords),
+                options => options.IncludeScopes = true);
+        });
+        var logger = loggerFactory.CreateLogger(nameof(OtlpLogExporterTests));
+
+        const string scopeValue1 = "Some scope value";
+        const string scopeValue2 = "Some other scope value";
+
+        // Act.
+        using (logger.BeginScope(new List<KeyValuePair<string, object>>
+        {
+            new(scopeKey1, scopeValue1),
+        }))
+        {
+            logger.Log(
+                LogLevel.Error,
+                new EventId(1),
+                new List<KeyValuePair<string, object>> { new(scopeKey2, scopeValue2) },
+                exception: new InvalidOperationException("Some exception message"),
+                formatter: (s, e) => string.Empty);
+        }
+
+        // Assert.
+        var logRecord = logRecords.Single();
+        var otlpLogRecord = ToOtlpLogs(DefaultSdkLimitOptions, new ExperimentalOptions(), logRecord);
+
+        Assert.NotNull(otlpLogRecord);
+        var allScopeValues = otlpLogRecord.Attributes
+            .Where(_ => _.Key == scopeKey1 || _.Key == scopeKey2)
+            .Select(_ => _.Value.StringValue);
+        Assert.Equal(5, otlpLogRecord.Attributes.Count);
+        Assert.Equal(2, allScopeValues.Count());
+        Assert.Contains(scopeValue1, allScopeValues);
+        Assert.Contains(scopeValue2, allScopeValues);
+    }
+
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public void AddOtlpLogExporterDefaultOptionsTest(bool callUseOpenTelemetry)
+    {
+        var services = new ServiceCollection();
+        services.AddLogging(builder =>
+        {
+            ConfigureOtlpExporter(builder, callUseOpenTelemetry);
+        });
+
+        using var sp = services.BuildServiceProvider();
+
+        sp.GetRequiredService<ILoggerFactory>();
+
+        var provider = sp.GetRequiredService<LoggerProvider>() as LoggerProviderSdk;
+        Assert.NotNull(provider);
+
+        var batchProcessor = provider.Processor as BatchLogRecordExportProcessor;
+        Assert.NotNull(batchProcessor);
+
+        Assert.Equal(BatchLogRecordExportProcessor.DefaultScheduledDelayMilliseconds, batchProcessor.ScheduledDelayMilliseconds);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void AddOtlpLogExporterUsesOtlpExporterProcessorTypeWhenLogRecordProcessorOptionsUnset(bool callUseOpenTelemetry)
+    {
+        var services = new ServiceCollection();
+        services.AddLogging(builder =>
+        {
+            ConfigureOtlpExporter(
+                builder,
+                callUseOpenTelemetry,
+                configureExporter: e => e.ExportProcessorType = ExportProcessorType.Simple);
+        });
+
+        using var sp = services.BuildServiceProvider();
+
+        sp.GetRequiredService<ILoggerFactory>();
+
+        var provider = sp.GetRequiredService<LoggerProvider>() as LoggerProviderSdk;
+        Assert.NotNull(provider);
+
+        var simpleProcessor = provider.Processor as SimpleLogRecordExportProcessor;
+        Assert.NotNull(simpleProcessor);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void AddOtlpLogExporterUsesOtlpExporterBatchOptionsWhenLogRecordProcessorOptionsUnset(bool callUseOpenTelemetry)
+    {
+        var services = new ServiceCollection();
+        services.AddLogging(builder =>
+        {
+            ConfigureOtlpExporter(
+                builder,
+                callUseOpenTelemetry,
+                configureExporter: e => e.BatchExportProcessorOptions.ScheduledDelayMilliseconds = 1000);
+        });
+
+        using var sp = services.BuildServiceProvider();
+
+        sp.GetRequiredService<ILoggerFactory>();
+
+        var provider = sp.GetRequiredService<LoggerProvider>() as LoggerProviderSdk;
+        Assert.NotNull(provider);
+
+        var batchProcessor = provider.Processor as BatchLogRecordExportProcessor;
+        Assert.NotNull(batchProcessor);
+
+        Assert.Equal(1000, batchProcessor.ScheduledDelayMilliseconds);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void AddOtlpLogExporterMergesBatchOptionsBySetting(bool callUseOpenTelemetry)
+    {
+        var services = new ServiceCollection();
+        services.AddLogging(builder =>
+        {
+            ConfigureOtlpExporter(
+                builder,
+                callUseOpenTelemetry,
+                configureExporterAndProcessor: (e, p) =>
+                {
+                    e.BatchExportProcessorOptions.ScheduledDelayMilliseconds = 2000;
+                    e.BatchExportProcessorOptions.ExporterTimeoutMilliseconds = 3000;
+                    e.BatchExportProcessorOptions.MaxExportBatchSize = 42;
+
+                    p.BatchExportProcessorOptions.ScheduledDelayMilliseconds = 1000;
+                });
+        });
+
+        using var sp = services.BuildServiceProvider();
+
+        sp.GetRequiredService<ILoggerFactory>();
+
+        var provider = sp.GetRequiredService<LoggerProvider>() as LoggerProviderSdk;
+        Assert.NotNull(provider);
+
+        var batchProcessor = provider.Processor as BatchLogRecordExportProcessor;
+        Assert.NotNull(batchProcessor);
+
+        Assert.Equal(1000, batchProcessor.ScheduledDelayMilliseconds);
+        Assert.Equal(3000, batchProcessor.ExporterTimeoutMilliseconds);
+        Assert.Equal(42, batchProcessor.MaxExportBatchSize);
+    }
+
+    [Theory]
+    [InlineData(ExportProcessorType.Simple, false)]
+    [InlineData(ExportProcessorType.Batch, false)]
+    [InlineData(ExportProcessorType.Simple, true)]
+    [InlineData(ExportProcessorType.Batch, true)]
+    public void AddOtlpLogExporterLogRecordProcessorOptionsTest(ExportProcessorType processorType, bool callUseOpenTelemetry)
+    {
+        var services = new ServiceCollection();
+        services.AddLogging(builder =>
+        {
+            ConfigureOtlpExporter(
+                builder,
+                callUseOpenTelemetry,
+                configureExporterAndProcessor: (e, p) =>
+                {
+                    e.ExportProcessorType = processorType == ExportProcessorType.Batch
+                        ? ExportProcessorType.Simple
+                        : ExportProcessorType.Batch;
+                    e.BatchExportProcessorOptions.ScheduledDelayMilliseconds = 2000;
+                    p.ExportProcessorType = processorType;
+                    p.BatchExportProcessorOptions = new BatchExportLogRecordProcessorOptions() { ScheduledDelayMilliseconds = 1000 };
+                });
+        });
+
+        using var sp = services.BuildServiceProvider();
+
+        sp.GetRequiredService<ILoggerFactory>();
+
+        var provider = sp.GetRequiredService<LoggerProvider>() as LoggerProviderSdk;
+        Assert.NotNull(provider);
+
+        var processor = provider.Processor;
+        Assert.NotNull(processor);
+
+        if (processorType == ExportProcessorType.Batch)
+        {
+            var batchProcessor = processor as BatchLogRecordExportProcessor;
+            Assert.NotNull(batchProcessor);
+
+            Assert.Equal(1000, batchProcessor.ScheduledDelayMilliseconds);
+        }
+        else
+        {
+            var simpleProcessor = processor as SimpleLogRecordExportProcessor;
+
+            Assert.NotNull(simpleProcessor);
+        }
+    }
+
+    [Fact]
+    public void ValidateInstrumentationScope()
+    {
+        var logRecords = new List<LogRecord>();
+        using var loggerFactory = LoggerFactory.Create(builder =>
+        {
+            builder.UseOpenTelemetry(logging => logging.AddInMemoryExporter(logRecords));
+        });
+
+        var logger1 = loggerFactory.CreateLogger("OtlpLogExporterTests-A");
+        logger1.HelloFromRedTomato();
+
+        var logger2 = loggerFactory.CreateLogger("OtlpLogExporterTests-B");
+        logger2.HelloFromGreenTomato();
+
+        Assert.Equal(2, logRecords.Count);
+
+        var batch = new Batch<LogRecord>([.. logRecords], logRecords.Count);
+        var resourceBuilder = ResourceBuilder.CreateEmpty();
+        var processResource = CreateResourceSpans(resourceBuilder.Build());
+
+        var request = CreateLogsExportRequest(DefaultSdkLimitOptions, new ExperimentalOptions(), batch, resourceBuilder.Build());
+
+        var resourceLog = Assert.Single(request.ResourceLogs);
+
+        var scope1 = resourceLog.ScopeLogs.First();
+        var scope2 = resourceLog.ScopeLogs.Last();
+
+        Assert.Equal("OtlpLogExporterTests-A", scope1.Scope.Name);
+        Assert.Equal("OtlpLogExporterTests-B", scope2.Scope.Name);
+
+        var logrecord1 = Assert.Single(scope1.LogRecords);
+        var logrecord2 = Assert.Single(scope2.LogRecords);
+
+        Assert.Equal("Hello from red-tomato", logrecord1.Body.StringValue);
+
+        Assert.Equal("Hello from green-tomato", logrecord2.Body.StringValue);
+
+        request = CreateLogsExportRequest(DefaultSdkLimitOptions, new ExperimentalOptions(), batch, resourceBuilder.Build());
+
+        Assert.Single(request.ResourceLogs);
+    }
+
+    [Theory]
+    [InlineData(null, false)]
+    [InlineData("logging", false)]
+    [InlineData(null, true)]
+    [InlineData("logging", true)]
+    public void VerifyEnvironmentVariablesTakenFromIConfigurationWhenUsingLoggerFactoryCreate(string? optionsName, bool callUseOpenTelemetry) =>
+        RunVerifyEnvironmentVariablesTakenFromIConfigurationTest(
+            optionsName,
+            configure =>
+            {
+                var factory = LoggerFactory.Create(logging =>
+                {
+                    configure(logging.Services);
+
+                    ConfigureOtlpExporter(
+                        logging,
+                        callUseOpenTelemetry,
+                        name: optionsName);
+                });
+
+                return (factory, factory);
+            });
+
+    [Theory]
+    [InlineData(null, false)]
+    [InlineData("logging", false)]
+    [InlineData(null, true)]
+    [InlineData("logging", true)]
+    public void VerifyEnvironmentVariablesTakenFromIConfigurationWhenUsingLoggingBuilder(string? optionsName, bool callUseOpenTelemetry) =>
+        RunVerifyEnvironmentVariablesTakenFromIConfigurationTest(
+            optionsName,
+            configure =>
+            {
+                var services = new ServiceCollection();
+
+                configure(services);
+
+                services.AddLogging(
+                    logging => ConfigureOtlpExporter(
+                        logging,
+                        callUseOpenTelemetry,
+                        name: optionsName));
+
+                var sp = services.BuildServiceProvider();
+
+                var factory = sp.GetRequiredService<ILoggerFactory>();
+
+                return (sp, factory);
+            });
+
+    [Theory]
+    [InlineData("my_instrumentation_scope_name", "my_instrumentation_scope_name")]
+    [InlineData(null, "")]
+    public void LogRecordLoggerNameIsExportedWhenUsingLogsApi(string? loggerName, string expectedScopeName)
+    {
+        var logRecords = new List<LogRecord>();
+
+        using (var loggerProvider = Sdk.CreateLoggerProviderBuilder()
+                   .AddInMemoryExporter(logRecords)
+                   .Build())
+        {
+            var logger = loggerProvider.GetLogger(loggerName);
+
+            logger.EmitLog(new LogRecordData());
+        }
+
+        var logRecord = Assert.Single(logRecords);
+
+        var batch = new Batch<LogRecord>([logRecord], 1);
+        var request = CreateLogsExportRequest(DefaultSdkLimitOptions, new ExperimentalOptions(), batch, ResourceBuilder.CreateEmpty().Build());
+
+        Assert.NotNull(request);
+        var resourceLog = Assert.Single(request.ResourceLogs);
+        var scopeLog = Assert.Single(resourceLog.ScopeLogs);
+
+        Assert.Equal(expectedScopeName, scopeLog.Scope?.Name);
+    }
+
+    [Theory]
+    [InlineData("https://opentelemetry.io/schemas/1.0.0", "https://opentelemetry.io/schemas/1.0.0")]
+    [InlineData(null, "")]
+    [InlineData("", "")]
+#pragma warning disable CA1054 // Change the type of parameter from 'string' to 'System.Uri'
+    public void LogRecordLoggerSchemaUrlIsExportedWhenUsingLogsApi(string? schemaUrl, string expectedSchemaUrl)
+#pragma warning restore CA1054 // Change the type of parameter from 'string' to 'System.Uri'
+    {
+        var logRecords = new List<LogRecord>();
+
+        var options = new LoggerOptions()
+        {
+            Name = "MyLogger",
+            SchemaUrl = schemaUrl,
+            Version = "1.0.0",
+        };
+
+        using (var loggerProvider = Sdk.CreateLoggerProviderBuilder()
+                   .AddInMemoryExporter(logRecords)
+                   .Build())
+        {
+            var logger = loggerProvider.GetLogger(options);
+            logger.EmitLog(new LogRecordData());
+        }
+
+        var logRecord = Assert.Single(logRecords);
+
+        var batch = new Batch<LogRecord>([logRecord], 1);
+        var request = CreateLogsExportRequest(DefaultSdkLimitOptions, new ExperimentalOptions(), batch, ResourceBuilder.CreateEmpty().Build());
+
+        Assert.NotNull(request);
+        var resourceLog = Assert.Single(request.ResourceLogs);
+        var scopeLog = Assert.Single(resourceLog.ScopeLogs);
+
+        Assert.Equal(expectedSchemaUrl, scopeLog.SchemaUrl);
+    }
+
+    [Fact]
+    public void LogRecordsFromLoggersWithSameNameVersionAndDifferentSchemaUrlsAreExportedAsSeparateScopes()
+    {
+        var logRecords = new List<LogRecord>();
+
+        using (var loggerProvider = Sdk.CreateLoggerProviderBuilder()
+                   .AddInMemoryExporter(logRecords)
+                   .Build())
+        {
+            loggerProvider.GetLogger(new LoggerOptions() { Name = "MyLogger", Version = "1.0.0", SchemaUrl = "https://opentelemetry.io/schemas/1.0.0" }).EmitLog(new LogRecordData());
+            loggerProvider.GetLogger(new LoggerOptions() { Name = "MyLogger", Version = "1.0.0", SchemaUrl = "https://opentelemetry.io/schemas/2.0.0" }).EmitLog(new LogRecordData());
+            loggerProvider.GetLogger(new LoggerOptions() { Name = "MyLogger", Version = "1.0.0", SchemaUrl = "https://opentelemetry.io/schemas/1.0.0" }).EmitLog(new LogRecordData());
+        }
+
+        Assert.Equal(3, logRecords.Count);
+
+        var batch = new Batch<LogRecord>([.. logRecords], logRecords.Count);
+        var request = CreateLogsExportRequest(DefaultSdkLimitOptions, new ExperimentalOptions(), batch, ResourceBuilder.CreateEmpty().Build());
+
+        Assert.NotNull(request);
+        var resourceLog = Assert.Single(request.ResourceLogs);
+
+        var scopeLogs = resourceLog.ScopeLogs;
+        Assert.Equal(2, scopeLogs.Count);
+        Assert.All(scopeLogs, scopeLog => Assert.Equal("MyLogger", scopeLog.Scope?.Name));
+
+        var schema1 = Assert.Single(scopeLogs, scopeLog => scopeLog.SchemaUrl == "https://opentelemetry.io/schemas/1.0.0");
+        Assert.Equal(2, schema1.LogRecords.Count);
+
+        var schema2 = Assert.Single(scopeLogs, scopeLog => scopeLog.SchemaUrl == "https://opentelemetry.io/schemas/2.0.0");
+        Assert.Single(schema2.LogRecords);
+    }
+
+    [Fact]
+    public void LogRecordsFromLoggersWithNullAndEmptySchemaUrlAreExportedAsTheSameScope()
+    {
+        var logRecords = new List<LogRecord>();
+
+        using (var loggerProvider = Sdk.CreateLoggerProviderBuilder()
+                   .AddInMemoryExporter(logRecords)
+                   .Build())
+        {
+            loggerProvider.GetLogger(new LoggerOptions() { Name = "MyLogger", Version = "1.0.0", SchemaUrl = null }).EmitLog(new LogRecordData());
+            loggerProvider.GetLogger(new LoggerOptions() { Name = "MyLogger", Version = "1.0.0", SchemaUrl = string.Empty }).EmitLog(new LogRecordData());
+        }
+
+        Assert.Equal(2, logRecords.Count);
+
+        var batch = new Batch<LogRecord>([.. logRecords], logRecords.Count);
+        var request = CreateLogsExportRequest(DefaultSdkLimitOptions, new ExperimentalOptions(), batch, ResourceBuilder.CreateEmpty().Build());
+
+        Assert.NotNull(request);
+
+        var logs = Assert.Single(request.ResourceLogs);
+        var scopeLog = Assert.Single(logs.ScopeLogs);
+
+        Assert.Equal("MyLogger", scopeLog.Scope?.Name);
+        Assert.Equal(string.Empty, scopeLog.SchemaUrl);
+        Assert.Equal(2, scopeLog.LogRecords.Count);
+    }
+
+    [Theory]
+    [InlineData("1.0.0", "1.0.0")]
+    [InlineData(null, "")]
+    [InlineData("", "")]
+    [InlineData("   ", "   ")]
+    public void LogRecordLoggerVersionIsExportedWhenUsingLogsApi(string? version, string expectedVersion)
+    {
+        var logRecords = new List<LogRecord>();
+
+        using (var loggerProvider = Sdk.CreateLoggerProviderBuilder()
+                   .AddInMemoryExporter(logRecords)
+                   .Build())
+        {
+            var logger = loggerProvider.GetLogger("MyLogger", version);
+
+            logger.EmitLog(new LogRecordData());
+        }
+
+        var logRecord = Assert.Single(logRecords);
+
+        var batch = new Batch<LogRecord>([logRecord], 1);
+        var request = CreateLogsExportRequest(DefaultSdkLimitOptions, new ExperimentalOptions(), batch, ResourceBuilder.CreateEmpty().Build());
+
+        Assert.NotNull(request);
+        var resourceLog = Assert.Single(request.ResourceLogs);
+        var singleScopeLog = Assert.Single(resourceLog.ScopeLogs);
+
+        Assert.Equal(expectedVersion, singleScopeLog.Scope?.Version);
+    }
+
+    [Fact]
+    public void LogRecordsFromLoggersWithSameNameAndDifferentVersionsAreExportedAsSeparateScopes()
+    {
+        var logRecords = new List<LogRecord>();
+
+        using (var loggerProvider = Sdk.CreateLoggerProviderBuilder()
+                   .AddInMemoryExporter(logRecords)
+                   .Build())
+        {
+            loggerProvider.GetLogger("MyLogger", "1.0.0").EmitLog(new LogRecordData());
+            loggerProvider.GetLogger("MyLogger", "2.0.0").EmitLog(new LogRecordData());
+            loggerProvider.GetLogger("MyLogger", "1.0.0").EmitLog(new LogRecordData());
+            loggerProvider.GetLogger("MyLogger", version: null).EmitLog(new LogRecordData());
+        }
+
+        Assert.Equal(4, logRecords.Count);
+
+        var batch = new Batch<LogRecord>([.. logRecords], logRecords.Count);
+        var request = CreateLogsExportRequest(DefaultSdkLimitOptions, new ExperimentalOptions(), batch, ResourceBuilder.CreateEmpty().Build());
+
+        Assert.NotNull(request);
+        var resourceLog = Assert.Single(request.ResourceLogs);
+
+        var scopeLogs = resourceLog.ScopeLogs;
+        Assert.Equal(3, scopeLogs.Count);
+        Assert.All(scopeLogs, scopeLog => Assert.Equal("MyLogger", scopeLog.Scope?.Name));
+
+        var v1 = Assert.Single(scopeLogs, scopeLog => scopeLog.Scope?.Version == "1.0.0");
+        Assert.Equal(2, v1.LogRecords.Count);
+
+        var v2 = Assert.Single(scopeLogs, scopeLog => scopeLog.Scope?.Version == "2.0.0");
+        Assert.Single(v2.LogRecords);
+
+        var unversioned = Assert.Single(scopeLogs, scopeLog => scopeLog.Scope?.Version.Length == 0);
+        Assert.Single(unversioned.LogRecords);
+    }
+
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public void LogRecordEventNameIsExportedWhenUsingLogsApi(bool emitEventName)
+    {
+        LogRecordAttributeList attributes = default;
+        attributes.Add("name", "tomato");
+        attributes.Add("price", 2.99);
+        attributes.Add("{OriginalFormat}", "Hello from {name} {price}.");
+
+        var logRecords = new List<LogRecord>();
+
+        using (var loggerProvider = Sdk.CreateLoggerProviderBuilder()
+                   .AddInMemoryExporter(logRecords)
+                   .Build())
+        {
+            var logger = loggerProvider.GetLogger();
+
+            logger.EmitLog(new LogRecordData
+            {
+                Body = "test body",
+                EventName = emitEventName ? "test event" : null,
+            });
+        }
+
+        var logRecord = Assert.Single(logRecords);
+
+        var otlpLogRecord = ToOtlpLogs(DefaultSdkLimitOptions, new ExperimentalOptions(), logRecord);
+
+        Assert.NotNull(otlpLogRecord);
+        Assert.Equal("test body", otlpLogRecord.Body.StringValue);
+
+        if (!emitEventName)
+        {
+            Assert.Empty(otlpLogRecord.EventName);
+        }
+        else
+        {
+            Assert.Equal("test event", otlpLogRecord.EventName);
+        }
+    }
+
+    [Fact]
+    public void LogSerialization_ExpandsBufferForLogsAndSerializes()
+    {
+        LogRecordAttributeList attributes = default;
+        attributes.Add("name", "tomato");
+        attributes.Add("price", 2.99);
+        attributes.Add("{OriginalFormat}", "Hello from {name} {price}.");
+
+        var logRecords = new List<LogRecord>();
+
+        using (var loggerProvider = Sdk.CreateLoggerProviderBuilder()
+                   .AddInMemoryExporter(logRecords)
+                   .Build())
+        {
+            var logger = loggerProvider.GetLogger("MyLogger");
+
+            logger.EmitLog(new LogRecordData());
+        }
+
+        var singleLogRecord = Assert.Single(logRecords);
+
+        var batch = new Batch<LogRecord>([singleLogRecord], 1);
+
+        var buffer = ProtobufSerializer.RentBuffer(50);
+        try
+        {
+            var writePosition = ProtobufOtlpLogSerializer.WriteLogsData(ref buffer, 0, DefaultSdkLimitOptions, new(), ResourceBuilder.CreateEmpty().Build(), batch, out _);
+            using var stream = new MemoryStream(buffer, 0, writePosition);
+            var logsData = OtlpLogs.LogsData.Parser.ParseFrom(stream);
+            var request = new OtlpCollector.ExportLogsServiceRequest();
+            request.ResourceLogs.Add(logsData.ResourceLogs);
+
+            Assert.True(buffer.Length > 50);
+            Assert.NotNull(request);
+            var resourceLog = Assert.Single(request.ResourceLogs);
+            var scopeLog = Assert.Single(resourceLog.ScopeLogs);
+
+            Assert.Equal("MyLogger", scopeLog.Scope?.Name);
+        }
+        finally
+        {
+            // The serializer may have grown (and swapped) the buffer, so return
+            // whatever buffer it ended up with to the pool.
+            ProtobufSerializer.ReturnBuffer(buffer);
+        }
+    }
+
+    private static void RunVerifyEnvironmentVariablesTakenFromIConfigurationTest(
+        string? optionsName,
+        Func<Action<IServiceCollection>, (IDisposable Container, ILoggerFactory LoggerFactory)> createLoggerFactoryFunc)
+    {
+        var values = new Dictionary<string, string?>
+        {
+            [OtlpSpecConfigDefinitions.DefaultEndpointEnvVarName] = "http://test:8888",
+        };
+
+        var configuration = new ConfigurationBuilder()
+            .AddInMemoryCollection(values)
+            .Build();
+
+        var configureDelegateCalled = false;
+        var configureExportProcessorOptionsCalled = false;
+        var configureBatchOptionsCalled = false;
+
+        var tracingConfigureDelegateCalled = false;
+        var unnamedConfigureDelegateCalled = false;
+        var allConfigureDelegateCalled = false;
+
+        var testState = createLoggerFactoryFunc(services =>
+        {
+            services.AddSingleton<IConfiguration>(configuration);
+
+            services.Configure<OtlpExporterOptions>(optionsName, o =>
+            {
+                configureDelegateCalled = true;
+                Assert.Equal(new Uri("http://test:8888"), o.Endpoint);
+            });
+
+            services.Configure<LogRecordExportProcessorOptions>(optionsName, o =>
+            {
+                configureExportProcessorOptionsCalled = true;
+            });
+
+            services.Configure<BatchExportLogRecordProcessorOptions>(optionsName, o =>
+            {
+                configureBatchOptionsCalled = true;
+            });
+
+            services.Configure<OtlpExporterOptions>("tracing", o =>
+            {
+                tracingConfigureDelegateCalled = true;
+            });
+
+            services.Configure<OtlpExporterOptions>(o =>
+            {
+                unnamedConfigureDelegateCalled = true;
+            });
+
+            services.ConfigureAll<OtlpExporterOptions>(o =>
+            {
+                allConfigureDelegateCalled = true;
+            });
+        });
+
+        using var container = testState.Container;
+
+        var factory = testState.LoggerFactory;
+
+        Assert.NotNull(factory);
+
+        var logger = factory.CreateLogger("TestLogger");
+
+        Assert.NotNull(logger);
+
+        Assert.True(configureDelegateCalled);
+        Assert.True(configureExportProcessorOptionsCalled);
+        Assert.True(configureBatchOptionsCalled);
+
+        Assert.False(tracingConfigureDelegateCalled);
+
+        Assert.Equal(optionsName == null, unnamedConfigureDelegateCalled);
+
+        Assert.True(allConfigureDelegateCalled);
+    }
+
+    private static OtlpCommon.KeyValue? TryGetAttribute(OtlpLogs.LogRecord record, string key)
+        => record.Attributes.FirstOrDefault(att => att.Key == key);
+
+    private static void ConfigureOtlpExporter(
+        ILoggingBuilder builder,
+        bool callUseOpenTelemetry,
+        string? name = null,
+        Action<OtlpExporterOptions>? configureExporter = null,
+        Action<OtlpExporterOptions, LogRecordExportProcessorOptions>? configureExporterAndProcessor = null,
+        Action<OpenTelemetryLoggerOptions>? configureOptions = null,
+        List<LogRecord>? logRecords = null)
+    {
+        if (callUseOpenTelemetry)
+        {
+            builder.UseOpenTelemetry(
+                logging =>
+                {
+                    if (configureExporterAndProcessor != null)
+                    {
+                        logging.AddOtlpExporter(name, configureExporterAndProcessor);
+                    }
+                    else
+                    {
+                        logging.AddOtlpExporter(name, configureExporter);
+                    }
+
+                    if (logRecords != null)
+                    {
+                        logging.AddInMemoryExporter(logRecords);
+                    }
+                },
+                options =>
+                {
+                    configureOptions?.Invoke(options);
+                });
+        }
+        else
+        {
+#pragma warning disable CS0618 // Type or member is obsolete
+            builder.AddOpenTelemetry(options =>
+            {
+                configureOptions?.Invoke(options);
+
+                if (configureExporterAndProcessor != null)
+                {
+                    options.AddOtlpExporter(name, configureExporterAndProcessor);
+                }
+                else
+                {
+                    options.AddOtlpExporter(name, configureExporter);
+                }
+
+                if (logRecords != null)
+                {
+                    options.AddInMemoryExporter(logRecords);
+                }
+            });
+#pragma warning restore CS0618 // Type or member is obsolete
+        }
+    }
+
+    private static OtlpCollector.ExportLogsServiceRequest CreateLogsExportRequest(SdkLimitOptions sdkOptions, ExperimentalOptions experimentalOptions, in Batch<LogRecord> batch, Resource resource)
+    {
+        var buffer = ProtobufSerializer.RentBuffer(4096);
+        try
+        {
+            var writePosition = ProtobufOtlpLogSerializer.WriteLogsData(ref buffer, 0, sdkOptions, experimentalOptions, resource, batch, out _);
+            using var stream = new MemoryStream(buffer, 0, writePosition);
+            var logsData = OtlpLogs.LogsData.Parser.ParseFrom(stream);
+            var request = new OtlpCollector.ExportLogsServiceRequest();
+            request.ResourceLogs.Add(logsData.ResourceLogs);
+            return request;
+        }
+        finally
+        {
+            ProtobufSerializer.ReturnBuffer(buffer);
+        }
+    }
+
+    private static OtlpLogs.LogRecord? ToOtlpLogs(SdkLimitOptions sdkOptions, ExperimentalOptions experimentalOptions, LogRecord logRecord)
+    {
+        var buffer = new byte[4096];
+        var dirtyLength = 0;
+        var writePosition = ProtobufOtlpLogSerializer.WriteLogRecord(buffer, 0, sdkOptions, experimentalOptions, logRecord, ref dirtyLength);
+        using var stream = new MemoryStream(buffer, 0, writePosition);
+        var scopeLogs = OtlpLogs.ScopeLogs.Parser.ParseFrom(stream);
+        return scopeLogs.LogRecords.FirstOrDefault();
+    }
+
+    private static ResourceSpans CreateResourceSpans(Resource resource)
+    {
+        var buffer = new byte[1024];
+        var writePosition = ProtobufOtlpResourceSerializer.WriteResource(buffer, 0, resource);
+
+        ResourceSpans? resourceSpans;
+        using (var stream = new MemoryStream(buffer, 0, writePosition))
+        {
+            resourceSpans = ResourceSpans.Parser.ParseFrom(stream);
+        }
+
+        return resourceSpans;
+    }
+
+    private sealed class PassThroughDelegatingHandler : DelegatingHandler;
+
+    private sealed class NonEnumerableReadOnlyList(params KeyValuePair<string, object?>[] items) : IReadOnlyList<KeyValuePair<string, object?>>
+    {
+        public int Count => items.Length;
+
+        public KeyValuePair<string, object?> this[int index] => items[index];
+
+        public IEnumerator<KeyValuePair<string, object?>> GetEnumerator()
+            => throw new InvalidOperationException("Enumeration is not supported.");
+
+        System.Collections.IEnumerator System.Collections.IEnumerable.GetEnumerator()
+            => throw new InvalidOperationException("Enumeration is not supported.");
+    }
+
+    private sealed class ToStringThrows
+    {
+        public override string ToString() => throw new InvalidOperationException("Nope.");
     }
 }

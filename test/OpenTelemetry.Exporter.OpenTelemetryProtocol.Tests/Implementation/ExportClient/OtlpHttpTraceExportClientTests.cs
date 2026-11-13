@@ -1,209 +1,209 @@
-// <copyright file="OtlpHttpTraceExportClientTests.cs" company="OpenTelemetry Authors">
 // Copyright The OpenTelemetry Authors
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//     http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
-// </copyright>
+// SPDX-License-Identifier: Apache-2.0
 
-using System;
-using System.Collections.Generic;
 using System.Diagnostics;
-using System.Linq;
+#if !NET
 using System.Net.Http;
-using System.Threading;
-#if !NET5_0_OR_GREATER
-using System.Threading.Tasks;
 #endif
-using Moq;
-using Moq.Protected;
 using OpenTelemetry.Exporter.OpenTelemetryProtocol.Implementation;
 using OpenTelemetry.Exporter.OpenTelemetryProtocol.Implementation.ExportClient;
+using OpenTelemetry.Exporter.OpenTelemetryProtocol.Implementation.Serializer;
 using OpenTelemetry.Resources;
 using OpenTelemetry.Trace;
-using Xunit;
-using OtlpCollector = Opentelemetry.Proto.Collector.Trace.V1;
+using OtlpCollector = OpenTelemetry.Proto.Collector.Trace.V1;
 
-namespace OpenTelemetry.Exporter.OpenTelemetryProtocol.Tests
+namespace OpenTelemetry.Exporter.OpenTelemetryProtocol.Tests;
+
+public sealed class OtlpHttpTraceExportClientTests : IDisposable
 {
-    public class OtlpHttpTraceExportClientTests
+    private static readonly SdkLimitOptions DefaultSdkLimitOptions = new();
+
+    private readonly ActivityListener activityListener;
+
+    static OtlpHttpTraceExportClientTests()
     {
-        static OtlpHttpTraceExportClientTests()
+        Activity.DefaultIdFormat = ActivityIdFormat.W3C;
+        Activity.ForceDefaultIdFormat = true;
+    }
+
+    public OtlpHttpTraceExportClientTests()
+    {
+        this.activityListener = new ActivityListener
         {
-            Activity.DefaultIdFormat = ActivityIdFormat.W3C;
-            Activity.ForceDefaultIdFormat = true;
+            ShouldListenTo = _ => true,
+            Sample = (ref options) => ActivitySamplingResult.AllDataAndRecorded,
+        };
 
-            var listener = new ActivityListener
-            {
-                ShouldListenTo = _ => true,
-                Sample = (ref ActivityCreationOptions<ActivityContext> options) => ActivitySamplingResult.AllData,
-            };
+        ActivitySource.AddActivityListener(this.activityListener);
+    }
 
-            ActivitySource.AddActivityListener(listener);
+    public void Dispose() => this.activityListener.Dispose();
+
+    [Fact]
+    public void NewOtlpHttpTraceExportClient_OtlpExporterOptions_ExporterHasCorrectProperties()
+    {
+        var header1 = new { Name = "hdr1", Value = "val1" };
+        var header2 = new { Name = "hdr2", Value = "val2" };
+
+        var options = new OtlpExporterOptions
+        {
+            Headers = $"{header1.Name}={header1.Value}, {header2.Name} = {header2.Value}",
+        };
+
+        var client = new OtlpHttpExportClient(options, options.HttpClientFactory(), "/v1/traces");
+
+        Assert.NotNull(client.HttpClient);
+
+        Assert.Equal(2 + options.StandardHeaders.Length, client.Headers.Count);
+        Assert.Contains(client.Headers, kvp => kvp.Key == header1.Name && kvp.Value == header1.Value);
+        Assert.Contains(client.Headers, kvp => kvp.Key == header2.Name && kvp.Value == header2.Value);
+
+        for (var i = 0; i < options.StandardHeaders.Length; i++)
+        {
+            Assert.Contains(client.Headers, entry => entry.Key == options.StandardHeaders[i].Key && entry.Value == options.StandardHeaders[i].Value);
+        }
+    }
+
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public void SendExportRequest_ExportTraceServiceRequest_SendsCorrectHttpRequest(bool includeServiceNameInResource)
+    {
+        // Arrange
+        var evenTags = new[] { new KeyValuePair<string, object?>("k0", "v0") };
+        var oddTags = new[] { new KeyValuePair<string, object?>("k1", "v1") };
+        var sources = new[]
+        {
+            new ActivitySource("even", "2.4.6"),
+            new ActivitySource("odd", "1.3.5"),
+        };
+        var header1 = new { Name = "hdr1", Value = "val1" };
+        var header2 = new { Name = "hdr2", Value = "val2" };
+
+        var options = new OtlpExporterOptions
+        {
+            Endpoint = new Uri("http://localhost:4317"),
+            Headers = $"{header1.Name}={header1.Value}, {header2.Name} = {header2.Value}",
+        };
+
+#pragma warning disable CA2000 // Dispose objects before losing scope
+        var testHttpHandler = new TestHttpMessageHandler();
+#pragma warning restore CA2000 // Dispose objects before losing scope
+
+        using var httpClient = new HttpClient(testHttpHandler);
+
+        var exportClient = new OtlpHttpExportClient(options, httpClient, string.Empty);
+
+        var resourceBuilder = ResourceBuilder.CreateEmpty();
+        if (includeServiceNameInResource)
+        {
+            resourceBuilder.AddAttributes(
+                [
+                    new(ResourceSemanticConventions.AttributeServiceName, "service_name"),
+                    new(ResourceSemanticConventions.AttributeServiceNamespace, "ns_1"),
+                ]);
         }
 
-        [Fact]
-        public void NewOtlpHttpTraceExportClient_OtlpExporterOptions_ExporterHasCorrectProperties()
+        var builder = Sdk.CreateTracerProviderBuilder()
+            .SetResourceBuilder(resourceBuilder)
+            .AddSource(sources[0].Name)
+            .AddSource(sources[1].Name);
+
+        using var openTelemetrySdk = builder.Build();
+
+        var exportedItems = new List<Activity>();
+#pragma warning disable CA2000 // Dispose objects before losing scope
+        var processor = new BatchActivityExportProcessor(new InMemoryExporter<Activity>(exportedItems));
+#pragma warning restore CA2000 // Dispose objects before losing scope
+        const int numOfSpans = 10;
+        bool isEven;
+        for (var i = 0; i < numOfSpans; i++)
         {
-            var header1 = new { Name = "hdr1", Value = "val1" };
-            var header2 = new { Name = "hdr2", Value = "val2" };
+            isEven = i % 2 == 0;
+            var source = sources[i % 2];
+            var activityKind = isEven ? ActivityKind.Client : ActivityKind.Server;
+            var activityTags = isEven ? evenTags : oddTags;
 
-            var options = new OtlpExporterOptions
-            {
-                Headers = $"{header1.Name}={header1.Value}, {header2.Name} = {header2.Value}",
-            };
-
-            var client = new OtlpHttpTraceExportClient(options, options.HttpClientFactory());
-
-            Assert.NotNull(client.HttpClient);
-
-            Assert.Equal(2, client.Headers.Count);
-            Assert.Contains(client.Headers, kvp => kvp.Key == header1.Name && kvp.Value == header1.Value);
-            Assert.Contains(client.Headers, kvp => kvp.Key == header2.Name && kvp.Value == header2.Value);
+            using var activity = source.StartActivity($"span-{i}", activityKind, parentContext: default, activityTags);
+            Assert.NotNull(activity);
+            processor.OnEnd(activity);
         }
 
-        [Theory]
-        [InlineData(true)]
-        [InlineData(false)]
-        public void SendExportRequest_ExportTraceServiceRequest_SendsCorrectHttpRequest(bool includeServiceNameInResource)
+        processor.Shutdown();
+
+        var batch = new Batch<Activity>([.. exportedItems], exportedItems.Count);
+        RunTest(batch);
+
+        void RunTest(Batch<Activity> batch)
         {
-            // Arrange
-            var evenTags = new[] { new KeyValuePair<string, object>("k0", "v0") };
-            var oddTags = new[] { new KeyValuePair<string, object>("k1", "v1") };
-            var sources = new[]
+            var deadlineUtc = DateTime.UtcNow.AddMilliseconds(httpClient.Timeout.TotalMilliseconds);
+            var request = new OtlpCollector.ExportTraceServiceRequest();
+
+            var (buffer, contentLength) = CreateTraceExportRequest(DefaultSdkLimitOptions, batch, resourceBuilder.Build());
+
+            // Act
+            ExportClientResponse result;
+            try
             {
-                new ActivitySource("even", "2.4.6"),
-                new ActivitySource("odd", "1.3.5"),
-            };
-            var header1 = new { Name = "hdr1", Value = "val1" };
-            var header2 = new { Name = "hdr2", Value = "val2" };
-
-            var options = new OtlpExporterOptions
+                result = exportClient.SendExportRequest(buffer, contentLength, deadlineUtc);
+            }
+            finally
             {
-                Endpoint = new Uri("http://localhost:4317"),
-                Headers = $"{header1.Name}={header1.Value}, {header2.Name} = {header2.Value}",
-            };
+                ProtobufSerializer.ReturnBuffer(buffer);
+            }
 
-            var httpHandlerMock = new Mock<HttpMessageHandler>();
+            var httpRequest = testHttpHandler.HttpRequestMessage;
 
-            HttpRequestMessage httpRequest = null;
-            var httpRequestContent = Array.Empty<byte>();
+            // Assert
+            Assert.True(result.Success);
+            Assert.NotNull(httpRequest);
+            Assert.Equal(HttpMethod.Post, httpRequest.Method);
+            Assert.NotNull(httpRequest.RequestUri);
+            Assert.Equal("http://localhost:4317/", httpRequest.RequestUri.AbsoluteUri);
+            Assert.Equal(options.StandardHeaders.Length + 2, httpRequest.Headers.Count());
+            Assert.Contains(httpRequest.Headers, h => h.Key == header1.Name && h.Value.First() == header1.Value);
+            Assert.Contains(httpRequest.Headers, h => h.Key == header2.Name && h.Value.First() == header2.Value);
 
-            httpHandlerMock.Protected()
-#if NET5_0_OR_GREATER
-                .Setup<HttpResponseMessage>("Send", ItExpr.IsAny<HttpRequestMessage>(), ItExpr.IsAny<CancellationToken>())
-                .Returns((HttpRequestMessage request, CancellationToken token) =>
-                {
-                    return new HttpResponseMessage();
-                })
-                .Callback<HttpRequestMessage, CancellationToken>((r, ct) =>
-                {
-                    httpRequest = r;
+            for (var i = 0; i < options.StandardHeaders.Length; i++)
+            {
+                Assert.Contains(httpRequest.Headers, entry => entry.Key == options.StandardHeaders[i].Key && entry.Value.First() == options.StandardHeaders[i].Value);
+            }
 
-                    // We have to capture content as it can't be accessed after request is disposed inside of SendExportRequest method
-                    httpRequestContent = r.Content.ReadAsByteArrayAsync()?.Result;
-                })
-#else
-                .Setup<Task<HttpResponseMessage>>("SendAsync", ItExpr.IsAny<HttpRequestMessage>(), ItExpr.IsAny<CancellationToken>())
-                .ReturnsAsync((HttpRequestMessage request, CancellationToken token) =>
-                {
-                    return new HttpResponseMessage();
-                })
-                .Callback<HttpRequestMessage, CancellationToken>(async (r, ct) =>
-                {
-                    httpRequest = r;
+            Assert.NotNull(testHttpHandler.HttpRequestContent);
 
-                    // We have to capture content as it can't be accessed after request is disposed inside of SendExportRequest method
-                    httpRequestContent = await r.Content.ReadAsByteArrayAsync();
-                })
-#endif
-                .Verifiable();
+            // TODO: Revisit once the HttpClient part is overridden.
+            // Assert.IsType<ProtobufOtlpHttpExportClient.ExportRequestContent>(httpRequest.Content);
+            Assert.NotNull(httpRequest.Content);
+            Assert.Contains(httpRequest.Content.Headers, h => h.Key == "Content-Type" && h.Value.First() == OtlpHttpExportClient.MediaHeaderValue.ToString());
 
-            var exportClient = new OtlpHttpTraceExportClient(options, new HttpClient(httpHandlerMock.Object));
+            var exportTraceRequest = OtlpCollector.ExportTraceServiceRequest.Parser.ParseFrom(testHttpHandler.HttpRequestContent);
+            Assert.NotNull(exportTraceRequest);
 
-            var resourceBuilder = ResourceBuilder.CreateEmpty();
+            var resourceSpan = Assert.Single(exportTraceRequest.ResourceSpans);
             if (includeServiceNameInResource)
             {
-                resourceBuilder.AddAttributes(
-                    new List<KeyValuePair<string, object>>
-                    {
-                        new KeyValuePair<string, object>(ResourceSemanticConventions.AttributeServiceName, "service_name"),
-                        new KeyValuePair<string, object>(ResourceSemanticConventions.AttributeServiceNamespace, "ns_1"),
-                    });
+                Assert.Contains(resourceSpan.Resource.Attributes, (kvp) => kvp.Key == ResourceSemanticConventions.AttributeServiceName && kvp.Value.StringValue == "service_name");
+                Assert.Contains(resourceSpan.Resource.Attributes, (kvp) => kvp.Key == ResourceSemanticConventions.AttributeServiceNamespace && kvp.Value.StringValue == "ns_1");
             }
-
-            var builder = Sdk.CreateTracerProviderBuilder()
-                .SetResourceBuilder(resourceBuilder)
-                .AddSource(sources[0].Name)
-                .AddSource(sources[1].Name);
-
-            using var openTelemetrySdk = builder.Build();
-
-            var exportedItems = new List<Activity>();
-            var processor = new BatchActivityExportProcessor(new InMemoryExporter<Activity>(exportedItems));
-            const int numOfSpans = 10;
-            bool isEven;
-            for (var i = 0; i < numOfSpans; i++)
+            else
             {
-                isEven = i % 2 == 0;
-                var source = sources[i % 2];
-                var activityKind = isEven ? ActivityKind.Client : ActivityKind.Server;
-                var activityTags = isEven ? evenTags : oddTags;
-
-                using Activity activity = source.StartActivity($"span-{i}", activityKind, parentContext: default, activityTags);
-                processor.OnEnd(activity);
+                Assert.DoesNotContain(resourceSpan.Resource.Attributes, kvp => kvp.Key == ResourceSemanticConventions.AttributeServiceName);
             }
+        }
+    }
 
-            processor.Shutdown();
-
-            var batch = new Batch<Activity>(exportedItems.ToArray(), exportedItems.Count);
-            RunTest(batch);
-
-            void RunTest(Batch<Activity> batch)
-            {
-                var request = new OtlpCollector.ExportTraceServiceRequest();
-
-                request.AddBatch(resourceBuilder.Build().ToOtlpResource(), batch);
-
-                // Act
-                var result = exportClient.SendExportRequest(request);
-
-                // Assert
-                Assert.True(result);
-                Assert.NotNull(httpRequest);
-                Assert.Equal(HttpMethod.Post, httpRequest.Method);
-                Assert.Equal("http://localhost:4317/", httpRequest.RequestUri.AbsoluteUri);
-                Assert.Equal(2, httpRequest.Headers.Count());
-                Assert.Contains(httpRequest.Headers, h => h.Key == header1.Name && h.Value.First() == header1.Value);
-                Assert.Contains(httpRequest.Headers, h => h.Key == header2.Name && h.Value.First() == header2.Value);
-
-                Assert.NotNull(httpRequest.Content);
-                Assert.IsType<OtlpHttpTraceExportClient.ExportRequestContent>(httpRequest.Content);
-                Assert.Contains(httpRequest.Content.Headers, h => h.Key == "Content-Type" && h.Value.First() == OtlpHttpTraceExportClient.MediaContentType);
-
-                var exportTraceRequest = OtlpCollector.ExportTraceServiceRequest.Parser.ParseFrom(httpRequestContent);
-                Assert.NotNull(exportTraceRequest);
-                Assert.Single(exportTraceRequest.ResourceSpans);
-
-                var resourceSpan = exportTraceRequest.ResourceSpans.First();
-                if (includeServiceNameInResource)
-                {
-                    Assert.Contains(resourceSpan.Resource.Attributes, (kvp) => kvp.Key == ResourceSemanticConventions.AttributeServiceName && kvp.Value.StringValue == "service_name");
-                    Assert.Contains(resourceSpan.Resource.Attributes, (kvp) => kvp.Key == ResourceSemanticConventions.AttributeServiceNamespace && kvp.Value.StringValue == "ns_1");
-                }
-                else
-                {
-                    Assert.Contains(resourceSpan.Resource.Attributes, (kvp) => kvp.Key == ResourceSemanticConventions.AttributeServiceName && kvp.Value.ToString().Contains("unknown_service:"));
-                }
-            }
+    private static (byte[] Buffer, int ContentLength) CreateTraceExportRequest(SdkLimitOptions sdkOptions, in Batch<Activity> batch, Resource resource)
+    {
+        var buffer = ProtobufSerializer.RentBuffer(4096);
+        try
+        {
+            var writePosition = ProtobufOtlpTraceSerializer.WriteTraceData(ref buffer, 0, sdkOptions, resource, batch, out _);
+            return (buffer, writePosition);
+        }
+        catch
+        {
+            ProtobufSerializer.ReturnBuffer(buffer);
+            throw;
         }
     }
 }

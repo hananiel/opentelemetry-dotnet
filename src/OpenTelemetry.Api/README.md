@@ -37,13 +37,13 @@ telemetry is exported to a specific telemetry backend, how to sample the
 telemetry, etc. The API consists of [Tracing
 API](https://github.com/open-telemetry/opentelemetry-specification/blob/main/specification/trace/api.md),
 [Logging
-API](https://github.com/open-telemetry/opentelemetry-specification/blob/main/specification/logs/overview.md),
+API](https://github.com/open-telemetry/opentelemetry-specification/blob/main/specification/logs/README.md),
 [Metrics
 API](https://github.com/open-telemetry/opentelemetry-specification/blob/main/specification/metrics/api.md),
 [Context and Propagation
 API](https://github.com/open-telemetry/opentelemetry-specification/tree/main/specification/context),
 and a set of [semantic
-conventions](https://github.com/open-telemetry/opentelemetry-specification/tree/main/specification/trace/semantic_conventions).
+conventions](https://github.com/open-telemetry/semantic-conventions/blob/main/docs/general/trace.md).
 
 ### Tracing API
 
@@ -137,7 +137,7 @@ Processors/Exporters see the same data.
 The recommended way of instrumenting is by using the [.NET Activity
 API](#instrumenting-a-libraryapplication-with-net-activity-api). Users are
 required to just take dependency on the
-[DiagnosticSource](https://www.nuget.org/packages/System.Diagnostics.DiagnosticSource/5.0.0).
+[DiagnosticSource](https://www.nuget.org/packages/System.Diagnostics.DiagnosticSource).
 Adding dependency to
 [OpenTelemetry.API](https://www.nuget.org/packages/opentelemetry.api) is
 required only for the following scenarios:
@@ -153,15 +153,14 @@ required only for the following scenarios:
    [Propagators](https://github.com/open-telemetry/opentelemetry-specification/blob/main/specification/context/api-propagators.md),
    to inject and extract context data. Some of the most common libraries
    requiring this include
-   [HttpClient](../OpenTelemetry.Instrumentation.Http/README.md),
-   [ASP.NET](../OpenTelemetry.Instrumentation.AspNet/README.md), [ASP.NET
-   Core](../OpenTelemetry.Instrumentation.AspNetCore/README.md). This repo
-   already provides instrumentation for these common libraries. If your library
-   is not built on top of these, and want to leverage propagators, follow the
-   [Context propagation](#context-propagation) section.
+   [HttpClient](https://github.com/open-telemetry/opentelemetry-dotnet-contrib/tree/main/src/OpenTelemetry.Instrumentation.Http/README.md),
+   [ASP.NET Core](https://github.com/open-telemetry/opentelemetry-dotnet-contrib/tree/main/src/OpenTelemetry.Instrumentation.AspNetCore/README.md).
+   This or contrib repository already provides instrumentation for these common
+   libraries. If your library is not built on top of these, and want to leverage
+   propagators, follow the [Context propagation](#context-propagation) section.
 
 3. You want to leverage
-   [Baggage](https://github.com/open-telemetry/opentelemetry-specification/blob/main/specification/baggage/api.md)
+   [Baggage](#baggage-api)
    API.
 
 ## Instrumenting a library/application with .NET Activity API
@@ -173,16 +172,11 @@ is the .NET `Activity` API. Guidance for instrumenting using this API is
 documented fully in the TBD(dotnet activity user guide link), but is described
 here as well.
 
-1. Install the `System.Diagnostics.DiagnosticSource` package version `5.0.1` or
-   above to your application or library.
+1. Install the latest stable `System.Diagnostics.DiagnosticSource` to your
+   application or library.
 
-    ```xml
-    <ItemGroup>
-      <PackageReference
-        Include="System.Diagnostics.DiagnosticSource"
-        Version="5.0.1"
-      />
-    </ItemGroup>
+    ```shell
+    dotnet add package System.Diagnostics.DiagnosticSource
     ```
 
 2. Create an `ActivitySource`, providing the name and version of the
@@ -191,8 +185,8 @@ here as well.
 
     ```csharp
     static ActivitySource activitySource = new ActivitySource(
-        "companyname.product.instrumentationlibrary",
-        "semver1.0.0");
+        "MyCompany.MyProduct.MyLibrary",
+        "1.0.0");
     ```
 
     The above requires import of the `System.Diagnostics` namespace.
@@ -212,8 +206,10 @@ here as well.
     this activity are protected with a null check.
 
 4. Populate activity with tags following the [OpenTelemetry semantic
-   conventions](https://github.com/open-telemetry/opentelemetry-specification/tree/main/specification/trace/semantic_conventions).
-   It is highly recommended to check `activity.IsAllDataRequested`, before
+   conventions](https://github.com/open-telemetry/semantic-conventions/blob/main/docs/general/trace.md),
+   using the
+   [SetTag](https://learn.microsoft.com/dotnet/api/system.diagnostics.activity.settag)
+   API. It is highly recommended to check `activity.IsAllDataRequested`, before
    populating any tags which are not readily available. `IsAllDataRequested` is
    the same as
    [Span.IsRecording](https://github.com/open-telemetry/opentelemetry-specification/blob/main/specification/trace/api.md#isrecording)
@@ -227,11 +223,6 @@ here as well.
         activity.SetTag("http.url", "http://www.mywebsite.com");
     }
     ```
-
-    The recommended way to [set span
-    attributes](https://github.com/open-telemetry/opentelemetry-specification/blob/main/specification/trace/api.md#set-attributes)
-    in `Activity` class is by using `SetTag()`. OpenTelemetry users should not
-    use other methods like `AddTag`, `SetCustomProperty` on `Activity`.
 
 5. Perform application/library logic.
 
@@ -258,7 +249,7 @@ following sections describes more features.
 ### Activity creation options
 
 Basic usage example above showed how `StartActivity` method can be used to start
-an `Activity`. The started activity will automatically becomes the `Current`
+an `Activity`. The started activity automatically becomes the `Current`
 activity. It is important to note that the `StartActivity` returns `null`, if no
 listeners are interested in the activity to be created. This happens when the
 final application does not enable OpenTelemetry, or when OpenTelemetry samplers
@@ -317,7 +308,7 @@ chose not to sample this activity.
    Attributes](https://github.com/open-telemetry/opentelemetry-specification/blob/main/specification/trace/api.md#set-attributes).
    Earlier sample showed the usage of `SetTag` method of `Activity` to add tags.
    Refer to the
-   [specification](https://github.com/open-telemetry/opentelemetry-specification/blob/main/specification/common/common.md#attribute-and-label-naming)
+   [specification](https://github.com/open-telemetry/opentelemetry-specification/blob/main/specification/common/attribute-naming.md)
    for best practices on naming tags. It is also possible to provide an initial
    set of tags during activity creation, as shown below. It is recommended to
    provide all available `Tags` during activity creation itself, as
@@ -341,11 +332,13 @@ chose not to sample this activity.
 
 4. Activity Links
 
-   Apart from the parent-child relation, activities can be linked using
-   `ActivityLinks` which represent the OpenTelemetry
-   [Links](https://github.com/open-telemetry/opentelemetry-specification/blob/main/specification/overview.md#links-between-spans).
-   The linked activities must be provided during the creation time, as shown
-   below.
+   In addition to parent-child relationships, activities can also be linked
+   using `ActivityLinks`, which represent
+   [Links](https://github.com/open-telemetry/opentelemetry-specification/blob/main/specification/overview.md#links-between-spans)
+   in OpenTelemetry. Providing activity links during creation is recommended, as
+   this allows samplers to consider them when deciding whether to sample an
+   activity. However, starting with `System.Diagnostics.DiagnosticSource` 9.0.0,
+   links can also be added after an activity is created.
 
     ```csharp
     var activityLinks = new List<ActivityLink>();
@@ -368,12 +361,19 @@ chose not to sample this activity.
         ActivityKind.Server,
         default(ActivityContext),
         initialTags,
-        activityLinks);
+        activityLinks); // links provided at creation time.
+
+    // One may add links after activity is created too.
+    var linkedContext3 = new ActivityContext(
+        ActivityTraceId.CreateFromString("01260a70a81e1fa3ad5a8acfeaa0f711"),
+        ActivitySpanId.CreateFromString("34739aa9e2239da1"),
+        ActivityTraceFlags.None);
+    activity?.AddLink(linkedContext3);
     ```
 
-    Note that `Activity` above is created with `default(ActivityContext)`
-    parent, which makes it child of implicit `Activity.Current` or orphan if
-    there is no `Current`.
+   Note that `Activity` above is created with `default(ActivityContext)`
+   parent, which makes it child of implicit `Activity.Current` or orphan if
+   there is no `Current`.
 
 ### Adding Events
 
@@ -392,8 +392,26 @@ corresponding overloads of `ActivityEvent`.
 
 OpenTelemetry defines a concept called
 [Status](https://github.com/open-telemetry/opentelemetry-specification/blob/main/specification/trace/api.md#set-status)
-to be associated with `Activity`. There is no `Status` class in .NET, and hence
-`Status` is set to an `Activity` using the following special tags:
+to be associated with `Activity`. Starting with [DiagnosticSource
+6.0](https://www.nuget.org/packages/System.Diagnostics.DiagnosticSource/6.0.0),
+`SetStatus` API on `Activity` can be used to set the status and description as
+shown below:
+
+```csharp
+activity?.SetStatus(ActivityStatusCode.Ok);
+activity?.SetStatus(ActivityStatusCode.Error, "Error Description");
+```
+
+All the official
+[Exporters](../../docs/trace/extending-the-sdk/README.md#exporter) shipped from
+this repo support the above shown mechanism of setting status.
+
+#### Setting Status - DiagnosticSource version older than 6.0
+
+Prior to [DiagnosticSource
+6.0](https://www.nuget.org/packages/System.Diagnostics.DiagnosticSource/6.0.0)
+there was no `Status` field in `Activity`, and hence `Status` is set to an
+`Activity` using the following special tags:
 
 `otel.status_code` is the `Tag` name used to store the `StatusCode`, and
 `otel.status_description` is the `Tag` name used to store the optional
@@ -440,30 +458,117 @@ and
 [extract](../../examples/MicroserviceExample/Utils/Messaging/MessageReceiver.cs)
 context.
 
+> [!NOTE]
+> If you are using the instrumentation libraries shipped from this repo [e.g.
+[ASP.NET
+Core](https://github.com/open-telemetry/opentelemetry-dotnet/tree/main/src/OpenTelemetry.Instrumentation.AspNetCore)
+or
+[HttpClient](https://github.com/open-telemetry/opentelemetry-dotnet/tree/main/src/OpenTelemetry.Instrumentation.Http)],
+context propagation is done by using the
+[default](https://github.com/open-telemetry/opentelemetry-dotnet/blob/d924663dc3d6bfdf737bc49ceaa1addcec90a2d6/src/OpenTelemetry/Sdk.cs#L34-L38)
+propagator. The default can be updated by calling
+`Sdk.SetDefaultTextMapPropagator` and passing the propagator of your choice.
+
+Propagator Api used by the instrumentation libraries is different than
+[DistributedContextPropagator](https://learn.microsoft.com/dotnet/api/system.diagnostics.distributedcontextpropagator)
+available in `System.Diagnostics`. Implementing this will have no impact on the
+propagation, if used alongside instrumentation libraries.
+
+### Environment variables as carriers
+
+The OpenTelemetry Specification defines a mechanism for using
+[environment variables as context propagation carriers](https://opentelemetry.io/docs/specs/otel/context/env-carriers/).
+
+When network protocols are not applicable, context and baggage can also be
+propagated through environment variables. Use
+`EnvironmentVariableCarrier.CurrentProcess` to read a normalized snapshot of the
+current process environment, and use `EnvironmentVariableCarrier.Set` to inject
+context into the environment dictionary of a child process. For a runnable
+end-to-end example, see
+[`examples/EnvironmentVariables`](../../examples/EnvironmentVariables/Program.cs).
+
+> [!IMPORTANT]
+> A process' environment variables may contain sensitive information, like secrets
+> or credentials. Ensure that any environment variables used for context propagation
+> are not exposed to untrusted child processes.
+>
+> See [Environment Variables as Context Propagation Carriers](https://opentelemetry.io/docs/specs/otel/context/env-carriers/#security)
+> for more information about security considerations when propagating context via
+> environment variables.
+
+```csharp
+using System.Diagnostics;
+using OpenTelemetry.Context.Propagation;
+
+var propagator = new CompositeTextMapPropagator(
+[
+    new TraceContextPropagator(),
+    new BaggagePropagator(),
+]);
+
+// Child process startup: extract from the current process' environment snapshot
+var parentContext = propagator.Extract(
+    default,
+    EnvironmentVariableCarrier.CurrentProcess,
+    EnvironmentVariableCarrier.Get);
+
+Baggage.Current = parentContext.Baggage;
+
+using var activity = activitySource.StartActivity(
+    "RunChildProcess",
+    ActivityKind.Internal,
+    parentContext.ActivityContext);
+
+var startInfo = new ProcessStartInfo("child.exe")
+{
+    UseShellExecute = false,
+};
+
+foreach (DictionaryEntry environmentVariable in Environment.GetEnvironmentVariables())
+{
+    startInfo.Environment[(string)environmentVariable.Key] = (string?)environmentVariable.Value;
+}
+
+// Parent process: inject into the child process environment copy
+var context = new PropagationContext(activity?.Context ?? default, Baggage.Current);
+propagator.Inject(context, startInfo.Environment, EnvironmentVariableCarrier.Set);
+```
+
+`EnvironmentVariableCarrier` normalizes keys by uppercasing ASCII letters,
+replacing non-ASCII letters, non-digits, and non-underscore characters with
+underscores, and prefixing `_` when a key would otherwise start with a digit.
+Values are treated as opaque strings and are not validated or modified by the
+carrier.
+
+When reading from a carrier, `EnvironmentVariableCarrier.Get` normalizes the
+requested key and reads only that normalized environment variable name. A
+non-normalized carrier key is not read, even when it would normalize to the
+requested key. Use `EnvironmentVariableCarrier.Capture`,
+`EnvironmentVariableCarrier.CurrentProcess`, or `EnvironmentVariableCarrier.Set`
+to ensure carrier keys are normalized.
+
 ## Introduction to OpenTelemetry .NET Metrics API
 
 Metrics in OpenTelemetry .NET are a somewhat unique implementation of the
 OpenTelemetry project, as the Metrics API is incorporated directly into the .NET
 runtime itself, as part of the
-[`System.Diagnostics.DiagnosticSource`](https://www.nuget.org/packages/System.Diagnostics.DiagnosticSource/6.0.0)
+[`System.Diagnostics.DiagnosticSource`](https://www.nuget.org/packages/System.Diagnostics.DiagnosticSource)
 package. This means, users can instrument their applications/libraries to emit
 metrics by simply using the `System.Diagnostics.DiagnosticSource` package. This
 package can be used in applications targeting any of the officially supported
-versions of [.NET Core](https://dotnet.microsoft.com/download/dotnet-core), and
-[.NET Framework](https://dotnet.microsoft.com/download/dotnet-framework) except
-for versions lower than `.NET Framework 4.6.1`.
+versions of [.NET](https://dotnet.microsoft.com/download/dotnet) and [.NET
+Framework](https://dotnet.microsoft.com/download/dotnet-framework) (an older
+Windows-based .NET implementation).
 
 ## Instrumenting a library/application with .NET Metrics API
 
 ### Basic metric usage
 
-1. Install the `System.Diagnostics.DiagnosticSource` package version
-   `6.0.0` or above to your application or library.
+1. Install the latest stable version of `System.Diagnostics.DiagnosticSource` to
+   your application or library.
 
-    ```xml
-    <ItemGroup>
-      <PackageReference Include="System.Diagnostics.DiagnosticSource" Version="6.0.0" />
-    </ItemGroup>
+    ```shell
+    dotnet add package System.Diagnostics.DiagnosticSource
     ```
 
 2. Create a `Meter`, providing the name and version of the library/application
@@ -473,14 +578,14 @@ for versions lower than `.NET Framework 4.6.1`.
     ```csharp
     static Meter meter = new Meter(
         "companyname.product.instrumentationlibrary",
-        "semver1.0.0");
+        "1.0.0");
     ```
 
     The above requires import of the `System.Diagnostics.Metrics` namespace.
 
-    **Note:**
-    It is important to note that `Meter` instances are created by using its
-    constructor, and *not* by calling a `GetMeter` method on the
+    > [!NOTE]
+    > It is important to note that `Meter` instances are created by
+    using its constructor, and *not* by calling a `GetMeter` method on the
     `MeterProvider`. This is an important distinction from the [OpenTelemetry
     specification](https://github.com/open-telemetry/opentelemetry-specification/blob/main/specification/metrics/api.md#get-a-meter),
     where `Meter`s are obtained from `MeterProvider`.
@@ -504,17 +609,20 @@ describes more kinds of instruments.
 
 ### Instrument types
 
-// TODO - add all instruments.
+See [this](../../docs/metrics/learning-more-instruments/README.md).
 
 ## Troubleshooting
 
 This component uses an
 [EventSource](https://docs.microsoft.com/dotnet/api/system.diagnostics.tracing.eventsource)
-with the name "OpenTelemetry-Api" for its internal logging.
-Please refer to [SDK
+with the name "OpenTelemetry-Api" for its internal logging. Please refer to [SDK
 troubleshooting](../OpenTelemetry/README.md#troubleshooting) for instructions on
 seeing these internal logs.
 
 ## References
 
-* [OpenTelemetry Project](https://opentelemetry.io/)
+* [OpenTelemetry Baggage API specification](https://github.com/open-telemetry/opentelemetry-specification/blob/main/specification/baggage/api.md)
+* [OpenTelemetry Logs API specification](https://github.com/open-telemetry/opentelemetry-specification/blob/main/specification/logs/api.md)
+* [OpenTelemetry Metrics API specification](https://github.com/open-telemetry/opentelemetry-specification/blob/main/specification/metrics/api.md)
+* [OpenTelemetry Propagators API specification](https://github.com/open-telemetry/opentelemetry-specification/blob/main/specification/context/api-propagators.md)
+* [OpenTelemetry Tracing API specification](https://github.com/open-telemetry/opentelemetry-specification/blob/main/specification/trace/api.md)

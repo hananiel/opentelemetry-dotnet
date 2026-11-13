@@ -1,98 +1,107 @@
-// <copyright file="TestEventListener.cs" company="OpenTelemetry Authors">
 // Copyright The OpenTelemetry Authors
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//     http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
-// </copyright>
+// SPDX-License-Identifier: Apache-2.0
 
-using System;
-using System.Collections.Generic;
+using System.Collections.Concurrent;
 using System.Diagnostics.Tracing;
-using System.Threading;
 
-namespace OpenTelemetry.Tests
+namespace OpenTelemetry.Tests;
+
+/// <summary>
+/// Event listener for testing event sources.
+/// </summary>
+#pragma warning disable CA1812
+internal sealed class TestEventListener : EventListener
+#pragma warning restore CA1812
 {
+    /// <summary>Unique Id used to identify events from the test thread.</summary>
+    private readonly Guid activityId;
+
     /// <summary>
-    /// Event listener for testing event sources.
+    /// Lock for event writing tracking.
     /// </summary>
-    internal class TestEventListener : EventListener
+    private readonly AutoResetEvent eventWritten;
+
+    /// <summary>A queue of events that have been logged.</summary>
+    private ConcurrentQueue<EventWrittenEventArgs> events;
+
+    /// <summary>
+    /// Initializes a new instance of the <see cref="TestEventListener"/> class.
+    /// </summary>
+    /// <param name="eventSource">The optional <see cref="EventSource"/> to enable.</param>
+    /// <param name="minLevel">The optional <see cref="EventLevel"/> to use with <paramref name="eventSource"/>.</param>
+    public TestEventListener(EventSource? eventSource = null, EventLevel minLevel = EventLevel.Verbose)
     {
-        /// <summary>A queue of events that have been logged.</summary>
-        private readonly Queue<EventWrittenEventArgs> events;
+        this.activityId = Guid.NewGuid();
+        EventSource.SetCurrentThreadActivityId(this.activityId);
 
-        /// <summary>
-        /// Lock for event writing tracking.
-        /// </summary>
-        private readonly AutoResetEvent eventWritten;
-
-        /// <summary>
-        /// Initializes a new instance of the <see cref="TestEventListener"/> class.
-        /// </summary>
-        public TestEventListener()
+        this.events = [];
+        this.eventWritten = new AutoResetEvent(false);
+        this.OnOnEventWritten = e =>
         {
-            this.events = new Queue<EventWrittenEventArgs>();
-            this.eventWritten = new AutoResetEvent(false);
-            this.OnOnEventWritten = e =>
-            {
-                this.events.Enqueue(e);
-                this.eventWritten.Set();
-            };
+            this.events.Enqueue(e);
+            this.eventWritten.Set();
+        };
+
+        if (eventSource is not null)
+        {
+            this.EnableEvents(eventSource, minLevel);
         }
+    }
 
-        /// <summary>Gets or sets the handler for event source creation.</summary>
-        public Action<EventSource> OnOnEventSourceCreated { get; set; }
+    /// <summary>Gets or sets the handler for event source creation.</summary>
+    public Action<EventSource>? OnOnEventSourceCreated { get; set; }
 
-        /// <summary>Gets or sets the handler for event source writes.</summary>
-        public Action<EventWrittenEventArgs> OnOnEventWritten { get; set; }
+    /// <summary>Gets or sets the handler for event source writes.</summary>
+    public Action<EventWrittenEventArgs> OnOnEventWritten { get; set; }
 
-        /// <summary>Gets the events that have been written.</summary>
-        public IEnumerable<EventWrittenEventArgs> Messages
+    /// <summary>Gets the events that have been written.</summary>
+    public IList<EventWrittenEventArgs> Messages
+    {
+        get
         {
-            get
+            if (this.events.IsEmpty)
             {
-                if (this.events.Count == 0)
-                {
-                    this.eventWritten.WaitOne(TimeSpan.FromSeconds(5));
-                }
-
-                while (this.events.Count != 0)
-                {
-                    yield return this.events.Dequeue();
-                }
+                this.eventWritten.WaitOne(TimeSpan.FromSeconds(5));
             }
-        }
 
-        /// <summary>
-        /// Clears all event messages so that testing can assert expected counts.
-        /// </summary>
-        public void ClearMessages()
-        {
-            this.events.Clear();
+            return [.. this.events];
         }
+    }
 
-        /// <summary>Handler for event source writes.</summary>
-        /// <param name="eventData">The event data that was written.</param>
-        protected override void OnEventWritten(EventWrittenEventArgs eventData)
+    /// <summary>
+    /// Gets the events already captured without waiting for new ones.
+    /// Use this instead of <see cref="Messages"/> when asserting that no events were fired,
+    /// since the queue is already fully populated by the time synchronous EventSource calls return.
+    /// </summary>
+    public IList<EventWrittenEventArgs> CurrentMessages => [.. this.events];
+
+    /// <summary>
+    /// Clears all event messages so that testing can assert expected counts.
+    /// </summary>
+    public void ClearMessages() => this.events = [];
+
+    public override void Dispose()
+    {
+        this.eventWritten.Dispose();
+        base.Dispose();
+    }
+
+    /// <summary>Handler for event source writes.</summary>
+    /// <param name="eventData">The event data that was written.</param>
+    protected override void OnEventWritten(EventWrittenEventArgs eventData)
+    {
+        if (eventData.ActivityId == this.activityId)
         {
             this.OnOnEventWritten(eventData);
         }
+    }
 
-        /// <summary>Handler for event source creation.</summary>
-        /// <param name="eventSource">The event source that was created.</param>
-        protected override void OnEventSourceCreated(EventSource eventSource)
-        {
-            // Check for null because this method is called by the base class constror before we can initialize it
-            Action<EventSource> callback = this.OnOnEventSourceCreated;
-            callback?.Invoke(eventSource);
-        }
+    /// <summary>Handler for event source creation.</summary>
+    /// <param name="eventSource">The event source that was created.</param>
+    protected override void OnEventSourceCreated(EventSource eventSource)
+    {
+        // Check for null because this method is called by the base class constructor before we can initialize it
+        var callback = this.OnOnEventSourceCreated;
+        callback?.Invoke(eventSource);
     }
 }

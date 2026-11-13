@@ -1,0 +1,274 @@
+// Copyright The OpenTelemetry Authors
+// SPDX-License-Identifier: Apache-2.0
+
+#if NET
+using System.Buffers;
+#endif
+using System.Collections;
+using System.Collections.ObjectModel;
+using System.Runtime.CompilerServices;
+#if NETSTANDARD
+using System.Runtime.InteropServices;
+#endif
+using OpenTelemetry.Internal;
+
+namespace OpenTelemetry.Context.Propagation;
+
+/// <summary>
+/// A class containing helper methods for using environment variables as context propagation carriers.
+/// </summary>
+/// <remarks>
+/// The carrier is format-agnostic and treats values as opaque strings. Key
+/// normalization follows the OpenTelemetry environment carrier specification by
+/// uppercasing ASCII letters, replacing non-ASCII letters, non-digits, and
+/// non-underscore characters with underscores, prefixing an underscore when
+/// a key would otherwise start with a digit, and replacing an empty
+/// key with a single underscore.
+/// </remarks>
+public static class EnvironmentVariableCarrier
+{
+#if NET
+    private static readonly SearchValues<char> NormalizedChars = SearchValues.Create("ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_");
+#endif
+
+    /// <summary>
+    /// Gets a snapshot of the current process' environment variables.
+    /// </summary>
+    /// <remarks>
+    /// This property is only initialized on the first access by an application.
+    /// Environment variable names are preserved and lookups use the platform's
+    /// case-sensitivity rules.
+    /// </remarks>
+    public static IReadOnlyDictionary<string, string?> CurrentProcess => field ??= CaptureFromCurrentProcess();
+
+    /// <summary>
+    /// Captures a snapshot of the supplied environment variables without changing
+    /// their names or values.
+    /// </summary>
+    /// <param name="environmentVariables">The environment variables to capture.</param>
+    /// <returns>A read-only snapshot of the supplied environment variables.</returns>
+    /// <remarks>
+    /// The snapshot uses case-sensitive, ordinal key comparisons. Non-normalized
+    /// names are preserved but are not matched by <c>Get</c>.
+    /// </remarks>
+    public static IReadOnlyDictionary<string, string?> Capture(IEnumerable<KeyValuePair<string, string?>> environmentVariables)
+    {
+        Guard.ThrowIfNull(environmentVariables);
+
+        Dictionary<string, string?> carrier = environmentVariables is ICollection<KeyValuePair<string, string?>> collection
+            ? new(collection.Count, StringComparer.Ordinal)
+            : new(StringComparer.Ordinal);
+
+        foreach (var environmentVariable in environmentVariables)
+        {
+            carrier[environmentVariable.Key] = environmentVariable.Value;
+        }
+
+#if NET
+        return carrier.AsReadOnly();
+#else
+        return new ReadOnlyDictionary<string, string?>(carrier);
+#endif
+    }
+
+    /// <summary>
+    /// Gets a value from an environment variable carrier using the supplied
+    /// propagation key, which is normalized before lookup.
+    /// </summary>
+    /// <typeparam name="T">The carrier type.</typeparam>
+    /// <param name="carrier">The carrier to read.</param>
+    /// <param name="key">
+    /// The propagation key to look up. This value may be unnormalized and
+    /// will be normalized before lookup.
+    /// </param>
+    /// <returns>
+    /// A single-item sequence containing the value when the key exists;
+    /// otherwise <see langword="null"/>.
+    /// </returns>
+    /// <remarks>
+    /// The requested key is normalized and only the matching normalized
+    /// environment variable name is read from the carrier. A non-normalized
+    /// carrier key is not matched, even when it would normalize to the
+    /// requested key.
+    /// On case-insensitive carriers, including <c>CurrentProcess</c> on Windows,
+    /// a name differing from the normalized key only by case may be matched.
+    /// </remarks>
+    public static IEnumerable<string>? Get<T>(T carrier, string key)
+        where T : IEnumerable<KeyValuePair<string, string?>>
+    {
+        Guard.ThrowIfNull(carrier);
+        Guard.ThrowIfNull(key);
+
+        var normalizedKey = NormalizeKey(key);
+
+        if (carrier is IReadOnlyDictionary<string, string?> readOnlyDictionary &&
+            readOnlyDictionary.TryGetValue(normalizedKey, out var readOnlyValue))
+        {
+            return ToEnumerable(readOnlyValue);
+        }
+
+        if (carrier is IDictionary<string, string?> dictionary &&
+            dictionary.TryGetValue(normalizedKey, out var dictionaryValue))
+        {
+            return ToEnumerable(dictionaryValue);
+        }
+
+        foreach (var entry in carrier)
+        {
+            // The specification requires reading only the normalized environment
+            // variable name. Non-normalized carrier keys are not matched, even
+            // when they would normalize to the requested key.
+            if (string.Equals(entry.Key, normalizedKey, StringComparison.Ordinal))
+            {
+                return ToEnumerable(entry.Value);
+            }
+        }
+
+        return null;
+
+        static IEnumerable<string>? ToEnumerable(string? value)
+        {
+            return value is null ? null : [value];
+        }
+    }
+
+    /// <summary>
+    /// Sets a value on an environment variable carrier by normalizing the
+    /// supplied propagation key before storing it.
+    /// </summary>
+    /// <typeparam name="T">The carrier type.</typeparam>
+    /// <param name="carrier">The carrier to write.</param>
+    /// <param name="key">The propagation key to normalize before storing.</param>
+    /// <param name="value">The value to store.</param>
+    public static void Set<T>(T carrier, string key, string value)
+        where T : IDictionary<string, string?>
+    {
+        Guard.ThrowIfNull(carrier);
+        Guard.ThrowIfNull(key);
+        Guard.ThrowIfNull(value);
+
+        carrier[NormalizeKey(key)] = value;
+    }
+
+    /// <summary>
+    /// Normalizes a propagation key to an environment variable name.
+    /// </summary>
+    /// <param name="key">The key to normalize.</param>
+    /// <returns>The normalized environment variable name.</returns>
+    public static string NormalizeKey(string key)
+    {
+        Guard.ThrowIfNull(key);
+        return IsAlreadyNormalized(key) ? key : CreateNormalizedKey(key);
+    }
+
+    internal static ReadOnlyDictionary<string, string?> CaptureFromCurrentProcess()
+    {
+        var environmentVariables = Environment.GetEnvironmentVariables();
+        var comparer =
+#if NET
+            OperatingSystem.IsWindows()
+#elif NETFRAMEWORK
+            Environment.OSVersion.Platform == PlatformID.Win32NT
+#else
+            RuntimeInformation.IsOSPlatform(OSPlatform.Windows)
+#endif
+                ? StringComparer.OrdinalIgnoreCase
+                : StringComparer.Ordinal;
+
+        var carrier = new Dictionary<string, string?>(environmentVariables.Count, comparer);
+
+        foreach (DictionaryEntry environmentVariable in environmentVariables)
+        {
+            carrier[Guard.ThrowIfNotOfType<string>(environmentVariable.Key)] = environmentVariable.Value?.ToString();
+        }
+
+#if NET
+        return carrier.AsReadOnly();
+#else
+        return new ReadOnlyDictionary<string, string?>(carrier);
+#endif
+    }
+
+    private static bool IsAlreadyNormalized(string key)
+    {
+        // An empty key is non-normalized and normalizes to a single underscore.
+        if (key.Length == 0 || char.IsAsciiDigit(key[0]))
+        {
+            return false;
+        }
+
+#if NET
+        return !key.AsSpan().ContainsAnyExcept(NormalizedChars);
+#else
+        foreach (var ch in key)
+        {
+            if (!IsNormalized(ch))
+            {
+                return false;
+            }
+        }
+
+        return true;
+#endif
+    }
+
+    private static string CreateNormalizedKey(string key)
+    {
+        if (key.Length == 0)
+        {
+            return "_";
+        }
+
+        var prefixLength = char.IsAsciiDigit(key[0]) ? 1 : 0;
+        int length = key.Length + prefixLength;
+
+#if NETSTANDARD2_1_OR_GREATER || NET
+        return string.Create(length, (key, prefixLength), static (buffer, state) =>
+        {
+            if (state.prefixLength == 1)
+            {
+                buffer[0] = '_';
+            }
+
+            for (var i = 0; i < state.key.Length; i++)
+            {
+                buffer[i + state.prefixLength] = NormalizeCharacter(state.key[i]);
+            }
+        });
+#else
+        var normalizedKey = new char[length];
+
+        if (prefixLength == 1)
+        {
+            normalizedKey[0] = '_';
+        }
+
+        for (var i = 0; i < key.Length; i++)
+        {
+            normalizedKey[i + prefixLength] = NormalizeCharacter(key[i]);
+        }
+
+        return new string(normalizedKey);
+#endif
+    }
+
+    private static char NormalizeCharacter(char value)
+    {
+        if (char.IsAsciiLetterLower(value))
+        {
+            return (char)(value - 32);
+        }
+
+        if (IsNormalized(value))
+        {
+            return value;
+        }
+
+        // Replace anything outside the normalized range with an underscore
+        return '_';
+    }
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static bool IsNormalized(char value) =>
+        char.IsAsciiLetterUpper(value) || char.IsAsciiDigit(value) || value == '_';
+}

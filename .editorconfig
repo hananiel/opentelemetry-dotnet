@@ -10,8 +10,17 @@ indent_size = 2
 insert_final_newline = true
 trim_trailing_whitespace = true
 
+[*.sh]
+end_of_line = lf
+
 [*.{cs,cshtml,htm,html,md,py,sln,xml}]
 indent_size = 4
+
+###############################
+# Copyright header            #
+###############################
+[*.cs]
+file_header_template = Copyright The OpenTelemetry Authors\nSPDX-License-Identifier: Apache-2.0
 
 ###############################
 # .NET Coding Conventions     #
@@ -34,8 +43,8 @@ csharp_indent_switch_labels = true
 csharp_indent_labels = flush_left
 
 # Modifier preferences
-csharp_preferred_modifier_order = public,private,protected,internal,static,extern,new,virtual,abstract,sealed,override,readonly,unsafe,volatile,async:suggestion
-dotnet_style_require_accessibility_modifiers = for_non_interface_members:silent
+csharp_preferred_modifier_order = public,private,protected,internal,file,static,extern,new,virtual,abstract,sealed,override,readonly,unsafe,required,volatile,async:suggestion
+dotnet_style_require_accessibility_modifiers = for_non_interface_members:suggestion
 
 # this. preferences
 dotnet_style_qualification_for_field = true:suggestion
@@ -47,8 +56,8 @@ dotnet_style_qualification_for_event = true:suggestion
 csharp_style_var_for_built_in_types = true:silent
 csharp_style_var_when_type_is_apparent = true:silent
 csharp_style_var_elsewhere = true:silent
-dotnet_style_predefined_type_for_locals_parameters_members = true:silent
-dotnet_style_predefined_type_for_member_access = true:silent
+dotnet_style_predefined_type_for_locals_parameters_members = true:suggestion
+dotnet_style_predefined_type_for_member_access = true:suggestion
 
 # name all constant fields using PascalCase
 dotnet_naming_rule.constant_fields_should_be_pascal_case.severity = suggestion
@@ -69,6 +78,7 @@ dotnet_style_readonly_field = true:suggestion
 csharp_style_implicit_object_creation_when_type_is_apparent = true:suggestion
 dotnet_style_prefer_simplified_interpolation = true:suggestion
 dotnet_style_object_initializer = true:suggestion
+csharp_style_prefer_primary_constructors = false:none
 
 # Expression-level preferences
 dotnet_style_object_initializer = true:suggestion
@@ -76,21 +86,23 @@ dotnet_style_collection_initializer = true:suggestion
 dotnet_style_explicit_tuple_names = true:suggestion
 dotnet_style_coalesce_expression = true:suggestion
 dotnet_style_null_propagation = true:suggestion
-dotnet_style_prefer_is_null_check_over_reference_equality_method = true:silent
+dotnet_style_prefer_is_null_check_over_reference_equality_method = true:suggestion
 dotnet_style_prefer_inferred_tuple_names = true:suggestion
 dotnet_style_prefer_inferred_anonymous_type_member_names = true:suggestion
-dotnet_style_prefer_auto_properties = true:silent
-dotnet_style_prefer_conditional_expression_over_assignment = true:silent
-dotnet_style_prefer_conditional_expression_over_return = true:silent
+dotnet_style_prefer_auto_properties = true:suggestion
+dotnet_style_prefer_conditional_expression_over_assignment = true:suggestion
+dotnet_style_prefer_conditional_expression_over_return = true:suggestion
 csharp_prefer_simple_default_expression = true:suggestion
+csharp_style_unused_value_expression_statement_preference = discard_variable:none
 
 # Expression-bodied members
-csharp_style_expression_bodied_methods = false:silent
-csharp_style_expression_bodied_constructors = false:silent
-csharp_style_expression_bodied_operators = false:silent
-csharp_style_expression_bodied_properties = true:silent
-csharp_style_expression_bodied_indexers = true:silent
-csharp_style_expression_bodied_accessors = true:silent
+csharp_style_expression_bodied_methods = true:suggestion
+dotnet_diagnostic.IDE0022.severity = suggestion # dotnet format doesn't respect the suggestion in the line above
+csharp_style_expression_bodied_constructors = false:warning
+csharp_style_expression_bodied_operators = true:suggestion
+csharp_style_expression_bodied_properties = true:suggestion
+csharp_style_expression_bodied_indexers = true:suggestion
+csharp_style_expression_bodied_accessors = true:suggestion
 
 # Pattern matching
 csharp_style_pattern_matching_over_is_with_cast_check = true:suggestion
@@ -102,8 +114,12 @@ csharp_style_throw_expression = true:suggestion
 csharp_style_conditional_delegate_call = true:suggestion
 
 # Other features
+csharp_style_prefer_index_operator = false:none
+csharp_style_prefer_range_operator = false:none
 csharp_style_pattern_local_over_anonymous_function = true:suggestion
 csharp_style_deconstructed_variable_declaration = true:suggestion
+csharp_style_namespace_declarations = file_scoped:warning
+dotnet_style_namespace_match_folder = false:none
 
 # Space preferences
 csharp_space_after_cast = false
@@ -119,10 +135,10 @@ csharp_space_between_method_declaration_parameter_list_parentheses = false
 csharp_space_between_parentheses = false
 
 # Parentheses preferences
-dotnet_style_parentheses_in_arithmetic_binary_operators = always_for_clarity:silent
-dotnet_style_parentheses_in_relational_binary_operators = always_for_clarity:silent
-dotnet_style_parentheses_in_other_binary_operators = always_for_clarity:silent
-dotnet_style_parentheses_in_other_operators = never_if_unnecessary:silent
+dotnet_style_parentheses_in_arithmetic_binary_operators = always_for_clarity:suggestion
+dotnet_style_parentheses_in_relational_binary_operators = always_for_clarity:suggestion
+dotnet_style_parentheses_in_other_binary_operators = always_for_clarity:suggestion
+dotnet_style_parentheses_in_other_operators = never_if_unnecessary:suggestion
 
 # Code analyzers
 # CA1031: Do not catch general exception types
@@ -140,8 +156,76 @@ dotnet_diagnostic.IDE0002.severity = warning
 # IDE0005: Remove unnecessary import
 dotnet_diagnostic.IDE0005.severity = warning
 
-[obj/**.cs]
+# IDE0045: if statement can be simplified
+dotnet_diagnostic.IDE0045.severity = silent
+
+# IDE0046: if statement can be simplified
+dotnet_diagnostic.IDE0046.severity = silent
+
+# RS0041: Public members should not use oblivious types
+dotnet_diagnostic.RS0041.severity = suggestion
+
+# xUnit1033: Test classes decorated with 'IClassFixture<T>' or 'ICollectionFixture<T>' should add a constructor argument of type 'T'
+dotnet_diagnostic.xUnit1033.severity = warning
+
+# xUnit1042: The member referenced by the MemberData attribute returns untyped data rows
+dotnet_diagnostic.xUnit1042.severity = warning
+
+# xUnit1044: Avoid using TheoryData type arguments that are not serializable
+dotnet_diagnostic.xUnit1044.severity = warning
+
+# xUnit1045: Avoid using TheoryData type arguments that might not be serializable
+dotnet_diagnostic.xUnit1045.severity = warning
+
+# xUnit1046: Avoid using TheoryDataRow arguments that are not serializable
+dotnet_diagnostic.xUnit1046.severity = warning
+
+# xUnit1047: Avoid using TheoryDataRow arguments that might not be serializable
+dotnet_diagnostic.xUnit1047.severity = warning
+
+# xUnit1050: The class referenced by the ClassData attribute returns untyped data rows
+dotnet_diagnostic.xUnit1050.severity = warning
+
+# xUnit2022: Boolean assertions should not be negated
+dotnet_diagnostic.xUnit2022.severity = warning
+
+# xUnit2023: Do not use collection methods for single-item collections
+dotnet_diagnostic.xUnit2023.severity = warning
+
+# xUnit2024: Do not use boolean asserts for simple equality tests
+dotnet_diagnostic.xUnit2024.severity = warning
+
+# xUnit2025: The boolean assertion statement can be simplified
+dotnet_diagnostic.xUnit2025.severity = warning
+
+# xUnit2032: Type assertions based on 'assignable from' are confusingly named
+dotnet_diagnostic.xUnit2032.severity = warning
+
+# xUnit2033: Use the assertion return value instead of re-deriving it
+dotnet_diagnostic.xUnit2033.severity = warning
+
+[*Tests.cs]
+# CA1515: Disable making types internal for Tests classes. It is required by xunit
+dotnet_diagnostic.CA1515.severity = none
+
+# CA2007: Disable Consider calling ConfigureAwait on the awaited task. It is not working with xunit
+dotnet_diagnostic.CA2007.severity = none
+
+[**/obj/**.cs]
 generated_code = true
 
 [*.csproj]
 indent_size = 2
+
+[*.cshtml.cs]
+dotnet_diagnostic.SA1649.severity = none
+
+# Verify settings
+[*.{received,verified}.{json,txt,xml}]
+charset = utf-8-bom
+end_of_line = lf
+indent_size = unset
+indent_style = unset
+insert_final_newline = false
+tab_width = unset
+trim_trailing_whitespace = false

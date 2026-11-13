@@ -1,0 +1,288 @@
+// Copyright The OpenTelemetry Authors
+// SPDX-License-Identifier: Apache-2.0
+
+using System.Diagnostics.Tracing;
+using System.Reflection;
+using Microsoft.Extensions.Configuration;
+using Microsoft.Extensions.Configuration.Memory;
+using OpenTelemetry.Tests;
+
+namespace OpenTelemetry.Configuration.Declarative.Tests;
+
+[Collection(EventSourceCollectionDefinition.Name)]
+public sealed class DeclarativeConfigurationProviderTests
+{
+    [Fact]
+    public void Load_MissingFile_ThrowsDeclarativeConfigurationException()
+    {
+        using var yamlFile = new DeclarativeYamlTestFileFactory();
+        var provider = new DeclarativeConfigurationProvider(new DeclarativeConfigurationDocumentAccessor(new FilePath(Path.Combine(yamlFile.TempDirectory, "nonexistent.yaml"))));
+
+        var ex = Assert.Throws<DeclarativeConfigurationException>(provider.Load);
+        Assert.IsType<FileNotFoundException>(ex.InnerException);
+    }
+
+    [Fact]
+    public void Load_ValidFile_PopulatesFlatKeys()
+    {
+        using var yamlFile = DeclarativeYamlTestFile.CreateDeclarativeYaml(disabled: true);
+
+        var provider = new DeclarativeConfigurationProvider(new DeclarativeConfigurationDocumentAccessor(new FilePath(yamlFile.Path)));
+        provider.Load();
+
+        Assert.True(provider.TryGet(OtelEnvironmentVariables.SdkDisabled, out var disabled), "Expected the provider to contain the SDK disabled key.");
+        Assert.Equal("true", disabled);
+
+        // resource.attributes goes through DeclarativeResourceDetector, not the flat projection,
+        // but strict mode still claims the key: it is in scope, so it masks rather than falls through.
+        // Resource keys use non-empty whitespace to suppress process environment fallback
+        // even through chained configuration; other masked keys read as null.
+        Assert.True(
+            provider.TryGet(OtelEnvironmentVariables.ResourceAttributes, out var resourceAttributes),
+            "Expected the provider to claim the resource attributes key.");
+        Assert.Equal(" ", resourceAttributes);
+        Assert.True(
+            provider.TryGet(OtelEnvironmentVariables.ServiceName, out var serviceName),
+            "Expected the provider to claim the service name key.");
+        Assert.Equal(" ", serviceName);
+        Assert.True(
+            provider.TryGet("OTEL_TRACES_SAMPLER", out var sampler),
+            "Expected the provider to claim the sampler key.");
+        Assert.Null(sampler);
+    }
+
+    [Fact]
+    public void Load_EmptyFile_LeavesDataEmpty()
+    {
+        using var yamlFile = DeclarativeYamlTestFile.CreateYamlFile(string.Empty);
+        var provider = new DeclarativeConfigurationProvider(new DeclarativeConfigurationDocumentAccessor(new FilePath(yamlFile.Path)));
+        provider.Load();
+
+        // An empty file masks every in-scope key without supplying a value for any of them.
+        Assert.True(
+            provider.TryGet(OtelEnvironmentVariables.SdkDisabled, out var disabled),
+            "Expected the provider to claim the SDK disabled key.");
+        Assert.Null(disabled);
+        Assert.True(
+            provider.TryGet(OtelEnvironmentVariables.ResourceAttributes, out var resourceAttributes),
+            "Expected the provider to claim the resource attributes key.");
+        Assert.Equal(" ", resourceAttributes);
+    }
+
+    [Theory]
+    [InlineData("OTEL_RESOURCE_ATTRIBUTES")]
+    [InlineData("otel_resource_attributes")]
+    [InlineData("OTEL_SERVICE_NAME")]
+    [InlineData("otel_service_name")]
+    public void ResourceMask_IsNonEmptyWhitespace_BeforeAndAfterLoad(string key)
+    {
+        using var yamlFile = DeclarativeYamlTestFile.CreateDeclarativeYaml();
+        var provider = new DeclarativeConfigurationProvider(
+            new DeclarativeConfigurationDocumentAccessor(new FilePath(yamlFile.Path)));
+
+        Assert.True(provider.TryGet(key, out var beforeLoad));
+        Assert.Equal(" ", beforeLoad);
+
+        provider.Load();
+
+        Assert.True(provider.TryGet(key, out var afterLoad), "Expected the provider to claim the key after load.");
+        Assert.Equal(" ", afterLoad);
+        Assert.DoesNotContain(
+            provider.GetChildKeys([key], parentPath: null),
+            child => string.Equals(child, key, StringComparison.OrdinalIgnoreCase));
+    }
+
+    [Fact]
+    public void Load_SecondLoad_LeavesDataUnchangedAndLogs()
+    {
+        using var yamlFile = DeclarativeYamlTestFile.CreateDeclarativeYaml(disabled: true);
+        var yamlWithoutDisabled = """
+            file_format: "1.0"
+            """;
+
+        using var listener = new TestEventListener();
+        listener.EnableEvents(
+            OpenTelemetryDeclarativeConfigurationEventSource.Log,
+            EventLevel.Warning,
+            EventKeywords.All);
+
+        var accessor = new DeclarativeConfigurationDocumentAccessor(new FilePath(yamlFile.Path));
+        var provider = new DeclarativeConfigurationProvider(accessor);
+        provider.Load();
+        Assert.True(
+            provider.TryGet(OtelEnvironmentVariables.SdkDisabled, out var disabled),
+            "Expected the provider to contain the SDK disabled key after the first load.");
+        Assert.Equal("true", disabled);
+
+        // Rewrite the file; the second Load() must ignore the change.
+        File.WriteAllText(yamlFile.Path, yamlWithoutDisabled);
+        provider.Load();
+
+        // The document's value is unchanged - second load was a no-op.
+        Assert.True(
+            provider.TryGet(OtelEnvironmentVariables.SdkDisabled, out disabled),
+            "Expected the provider to retain the SDK disabled key after the second load.");
+        Assert.Equal("true", disabled);
+        Assert.Single(listener.Messages, e => e.EventId == 26);
+    }
+
+    [Fact]
+    public void Load_SecondLoad_DoesNotReparse()
+    {
+        var parseCount = 0;
+        using var yamlFile = DeclarativeYamlTestFile.CreateDeclarativeYaml(disabled: true);
+
+        var accessor = new DeclarativeConfigurationDocumentAccessor(
+            new FilePath(yamlFile.Path),
+            filePath =>
+            {
+                Interlocked.Increment(ref parseCount);
+                return DeclarativeConfigurationReader.Read(filePath);
+            });
+        var provider = new DeclarativeConfigurationProvider(accessor);
+
+        provider.Load();
+        provider.Load();
+
+        Assert.Equal(1, parseCount);
+    }
+
+    [Fact]
+    public void Load_SetsDataToTheDocumentsFlatKeysWithoutCopying()
+    {
+        // Identity, not equivalence: the provider must publish the document's own dictionary, so that
+        // every provider sharing an accessor exposes one projection rather than a copy per provider.
+        using var yamlFile = DeclarativeYamlTestFile.CreateDeclarativeYaml(disabled: true);
+        var accessor = new DeclarativeConfigurationDocumentAccessor(new FilePath(yamlFile.Path));
+        var provider = new DeclarativeConfigurationProvider(accessor);
+
+        provider.Load();
+
+        // Data is protected on ConfigurationProvider and the provider is sealed, so there is no
+        // subclass seam; reflection is the only way to assert on the instance itself.
+        var data = typeof(ConfigurationProvider)
+            .GetProperty("Data", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .GetValue(provider);
+
+        Assert.Same(accessor.GetDocument().FlatKeys, data);
+    }
+
+    [Fact]
+    public void Load_ProviderRebuiltFromSameSource_ReusesDocumentWithoutReparsing()
+    {
+        // ConfigurationManager rebuilds its providers when the sources collection is mutated other
+        // than by appending. The rebuilt provider shares the accessor, so the file is not re-read.
+        using var yamlFile = DeclarativeYamlTestFile.CreateDeclarativeYaml(disabled: true);
+        var parseCount = 0;
+        var accessor = new DeclarativeConfigurationDocumentAccessor(
+            new FilePath(yamlFile.Path),
+            filePath =>
+            {
+                Interlocked.Increment(ref parseCount);
+                return DeclarativeConfigurationReader.Read(filePath);
+            });
+
+        using var manager = new ConfigurationManager();
+        manager.AddOpenTelemetryDeclarativeConfiguration(accessor);
+        var originalProvider = ((IConfigurationRoot)manager).Providers
+            .OfType<DeclarativeConfigurationProvider>()
+            .Single();
+
+        manager.Sources.Insert(0, new MemoryConfigurationSource());
+
+        var rebuiltProvider = ((IConfigurationRoot)manager).Providers
+            .OfType<DeclarativeConfigurationProvider>()
+            .Single();
+
+        Assert.NotSame(originalProvider, rebuiltProvider);
+        Assert.Same(accessor, rebuiltProvider.Accessor);
+        Assert.Equal("true", manager[OtelEnvironmentVariables.SdkDisabled]);
+        Assert.Equal(1, parseCount);
+    }
+
+    [Fact]
+    public void Reload_OnConfigurationRoot_DoesNotThrow()
+    {
+        using var yamlFile = DeclarativeYamlTestFile.CreateDeclarativeYaml(disabled: true);
+
+        var root = new ConfigurationBuilder()
+            .AddOpenTelemetryDeclarativeConfiguration(yamlFile.Path)
+            .Build();
+
+        // IConfigurationRoot.Reload() must not throw even though the provider ignores it.
+        var ex = Record.Exception(root.Reload);
+        Assert.Null(ex);
+    }
+
+    [Fact]
+    public void Load_InvalidFileFormat_ThrowsDeclarativeConfigurationException()
+    {
+        using var yamlFile = DeclarativeYamlTestFile.CreateDeclarativeYaml(fileFormat: "99.0");
+        var provider = new DeclarativeConfigurationProvider(new DeclarativeConfigurationDocumentAccessor(new FilePath(yamlFile.Path)));
+
+        Assert.Throws<DeclarativeConfigurationException>(provider.Load);
+    }
+
+    [Fact]
+    public void Load_SubstitutesThenTranslates()
+    {
+        // attributes_list (not attributes) is the flat-projection path; verify substitution runs first.
+        const string yaml = """
+            file_format: "1.0"
+            resource:
+              attributes_list: service.name=${SERVICE_NAME:-default-svc}
+            """;
+
+        using var yamlFile = DeclarativeYamlTestFile.CreateYamlFile(yaml);
+        var provider = new DeclarativeConfigurationProvider(new DeclarativeConfigurationDocumentAccessor(new FilePath(yamlFile.Path)));
+        provider.Load();
+
+        Assert.True(
+            provider.TryGet(OtelEnvironmentVariables.ResourceAttributes, out var attrs),
+            "Expected the provider to contain the translated resource attributes key.");
+        Assert.Equal("service.name=default-svc", attrs);
+    }
+
+    [Fact]
+    public void Load_InvalidSubstitutionInResourceValue_ThrowsDeclarativeConfigurationException()
+    {
+        const string yaml = """
+            file_format: "1.0"
+            resource:
+              attributes:
+                - name: service.name
+                  value: ${1INVALID}
+            """;
+
+        using var yamlFile = DeclarativeYamlTestFile.CreateYamlFile(yaml);
+        var provider = new DeclarativeConfigurationProvider(new DeclarativeConfigurationDocumentAccessor(new FilePath(yamlFile.Path)));
+
+        Assert.Throws<DeclarativeConfigurationException>(provider.Load);
+    }
+
+    [Fact]
+    public void Load_FileFormat04_ThrowsDeclarativeConfigurationException()
+    {
+        const string yaml = """
+            file_format: "0.4"
+            """;
+
+        using var yamlFile = DeclarativeYamlTestFile.CreateYamlFile(yaml);
+        var provider = new DeclarativeConfigurationProvider(new DeclarativeConfigurationDocumentAccessor(new FilePath(yamlFile.Path)));
+
+        Assert.Throws<DeclarativeConfigurationException>(provider.Load);
+    }
+
+    [Fact]
+    public void Load_InvalidYamlSyntax_ThrowsDeclarativeConfigurationException()
+    {
+        const string yaml = "{ unclosed: [bracket";
+
+        using var yamlFile = DeclarativeYamlTestFile.CreateYamlFile(yaml);
+        var provider = new DeclarativeConfigurationProvider(new DeclarativeConfigurationDocumentAccessor(new FilePath(yamlFile.Path)));
+
+        var ex = Assert.Throws<DeclarativeConfigurationException>(provider.Load);
+        Assert.NotNull(ex.InnerException);
+        Assert.IsType<YamlDotNet.Core.YamlException>(ex.InnerException, exactMatch: false);
+    }
+}

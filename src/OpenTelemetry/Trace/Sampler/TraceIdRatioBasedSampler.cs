@@ -1,0 +1,85 @@
+// Copyright The OpenTelemetry Authors
+// SPDX-License-Identifier: Apache-2.0
+
+using System.Buffers.Binary;
+using System.Globalization;
+using OpenTelemetry.Internal;
+
+namespace OpenTelemetry.Trace;
+
+/// <summary>
+/// Samples traces according to the specified probability.
+/// </summary>
+public sealed class TraceIdRatioBasedSampler
+    : Sampler
+{
+    private readonly long idUpperBound;
+    private readonly double probability;
+
+    /// <summary>
+    /// Initializes a new instance of the <see cref="TraceIdRatioBasedSampler"/> class.
+    /// </summary>
+    /// <param name="probability">The desired probability of sampling. This must be between 0.0 and 1.0.
+    /// Higher the value, higher is the probability of a given Activity to be sampled in.
+    /// </param>
+    public TraceIdRatioBasedSampler(double probability)
+    {
+        Guard.ThrowIfOutOfRange(probability, min: 0.0, max: 1.0);
+
+        this.probability = probability;
+
+        // The expected description is like TraceIdRatioBasedSampler{0.000100}
+        this.Description = "TraceIdRatioBasedSampler{" + this.probability.ToString("F6", CultureInfo.InvariantCulture) + "}";
+
+        // Special case the limits, to avoid any possible issues with lack of precision across
+        // double/long boundaries. For probability == 0.0, we use long.MinValue as this guarantees
+        // that we will never sample a trace: (anyValue & long.MaxValue) is always >= 0,
+        // and 0 < long.MinValue is false for every possible trace ID.
+        if (this.probability == 0.0)
+        {
+            this.idUpperBound = long.MinValue;
+        }
+        else if (this.probability == 1.0)
+        {
+            this.idUpperBound = long.MaxValue;
+        }
+        else
+        {
+            this.idUpperBound = (long)(probability * long.MaxValue);
+        }
+    }
+
+    /// <inheritdoc />
+    public override SamplingResult ShouldSample(in SamplingParameters samplingParameters)
+    {
+        if (this.IsShutdown)
+        {
+            return new SamplingResult(SamplingDecision.Drop);
+        }
+
+        // Always sample if we are within probability range. This is true even for child activities (that
+        // may have had a different sampling decision made) to allow for different sampling policies,
+        // and dynamic increases to sampling probabilities for debugging purposes.
+        // Masking with long.MaxValue clears the sign bit, mapping every possible long value uniformly
+        // into [0, long.MaxValue] without any branching or overflow risk.
+        // Note use of '<' for comparison. This ensures that we never sample for probability == 0.0,
+        // while allowing for a (very) small chance of *not* sampling if the id == Long.MAX_VALUE.
+        // This is considered a reasonable trade-off for the simplicity/performance requirements (this
+        // code is executed in-line for every Activity creation).
+#if NET
+        // This optimization can be removed once https://github.com/dotnet/runtime/pull/134135
+        // is available in a future version of System.Diagnostics.DiagnosticSource.
+        Span<byte> traceIdBytes = stackalloc byte[8];
+        var status = Convert.FromHexString(samplingParameters.TraceId.ToHexString().AsSpan(0, 16), traceIdBytes, out _, out var bytesWritten);
+        if (status != System.Buffers.OperationStatus.Done || bytesWritten != traceIdBytes.Length)
+        {
+            throw new ArgumentOutOfRangeException(nameof(samplingParameters), "The trace id is not a valid hex string.");
+        }
+#else
+        Span<byte> traceIdBytes = stackalloc byte[16];
+        samplingParameters.TraceId.CopyTo(traceIdBytes);
+#endif
+
+        return new SamplingResult((BinaryPrimitives.ReadInt64BigEndian(traceIdBytes) & long.MaxValue) < this.idUpperBound);
+    }
+}

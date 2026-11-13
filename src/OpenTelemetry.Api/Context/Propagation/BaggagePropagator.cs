@@ -1,181 +1,635 @@
-// <copyright file="BaggagePropagator.cs" company="OpenTelemetry Authors">
 // Copyright The OpenTelemetry Authors
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//     http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
-// </copyright>
+// SPDX-License-Identifier: Apache-2.0
 
-using System;
-using System.Collections.Generic;
-using System.Linq;
-using System.Net;
+#if NET
+using System.Buffers;
+using System.Collections.Immutable;
+#endif
+using System.Diagnostics;
+#if NET
+using System.Diagnostics.CodeAnalysis;
+#endif
 using System.Text;
 using OpenTelemetry.Internal;
 
-namespace OpenTelemetry.Context.Propagation
+namespace OpenTelemetry.Context.Propagation;
+
+/// <summary>
+/// A text map propagator for W3C Baggage. See https://w3c.github.io/baggage/.
+/// </summary>
+public class BaggagePropagator : TextMapPropagator
 {
-    /// <summary>
-    /// A text map propagator for W3C Baggage. See https://w3c.github.io/baggage/.
-    /// </summary>
-    public class BaggagePropagator : TextMapPropagator
+    internal const string BaggageHeaderName = "baggage";
+    private const string Hex = "0123456789ABCDEF";
+
+    private const int MaxBaggageLength = 8192;
+    private const int MaxBaggageItems = 180;
+
+#if !NET
+    // First code point outside ASCII. The lookup tables only cover ASCII.
+    private const int AsciiLimit = 0x80;
+
+    // Replacement for a lone surrogate, the same as Encoding.UTF8 uses.
+    private const int ReplacementCharacter = 0xFFFD;
+#endif
+
+    private const string ValidKeyChars =
+        "!#$%&'*+-.^_`|~0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
+
+    // W3C Baggage 3.3 baggage-octet, '%' excluded so raw '%' is always encoded as %25
+    private const string ValidValueChars =
+        "!#$&'()*+-./:<=>?@[]^_`{|}~0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
+
+#if NET
+    private static readonly SearchValues<char> ValidKeySearcher = SearchValues.Create(ValidKeyChars);
+    private static readonly SearchValues<char> ValidValueSearcher = SearchValues.Create(ValidValueChars);
+#else
+    // ASCII lookup tables so membership checks do not scan the char arrays above for every character.
+    private static readonly bool[] ValidKeyLookup = CreateAsciiLookup(ValidKeyChars);
+    private static readonly bool[] ValidValueLookup = CreateAsciiLookup(ValidValueChars);
+#endif
+
+#if NET
+    private static readonly ImmutableHashSet<string> AllFields = [BaggageHeaderName];
+#else
+    private static readonly HashSet<string> AllFields = [BaggageHeaderName];
+#endif
+
+    /// <inheritdoc/>
+    /// <remarks>
+    /// Callers should not modify the returned set.
+    /// </remarks>
+    public override ISet<string> Fields => AllFields;
+
+    /// <inheritdoc/>
+    public override PropagationContext Extract<T>(PropagationContext context, T carrier, Func<T, string, IEnumerable<string>?> getter)
     {
-        internal const string BaggageHeaderName = "baggage";
-
-        private const int MaxBaggageLength = 8192;
-        private const int MaxBaggageItems = 180;
-
-        private static readonly char[] EqualSignSeparator = new[] { '=' };
-        private static readonly char[] CommaSignSeparator = new[] { ',' };
-
-        /// <inheritdoc/>
-        public override ISet<string> Fields => new HashSet<string> { BaggageHeaderName };
-
-        /// <inheritdoc/>
-        public override PropagationContext Extract<T>(PropagationContext context, T carrier, Func<T, string, IEnumerable<string>> getter)
+        if (context.Baggage != default)
         {
-            if (context.Baggage != default)
-            {
-                // If baggage has already been extracted, perform a noop.
-                return context;
-            }
-
-            if (carrier == null)
-            {
-                OpenTelemetryApiEventSource.Log.FailedToExtractBaggage(nameof(BaggagePropagator), "null carrier");
-                return context;
-            }
-
-            if (getter == null)
-            {
-                OpenTelemetryApiEventSource.Log.FailedToExtractBaggage(nameof(BaggagePropagator), "null getter");
-                return context;
-            }
-
-            try
-            {
-                Dictionary<string, string> baggage = null;
-                var baggageCollection = getter(carrier, BaggageHeaderName);
-                if (baggageCollection?.Any() ?? false)
-                {
-                    TryExtractBaggage(baggageCollection.ToArray(), out baggage);
-                }
-
-                return new PropagationContext(
-                    context.ActivityContext,
-                    baggage == null ? context.Baggage : new Baggage(baggage));
-            }
-            catch (Exception ex)
-            {
-                OpenTelemetryApiEventSource.Log.BaggageExtractException(nameof(BaggagePropagator), ex);
-            }
-
+            // If baggage has already been extracted, perform a noop.
             return context;
         }
 
-        /// <inheritdoc/>
-        public override void Inject<T>(PropagationContext context, T carrier, Action<T, string, string> setter)
+        if (carrier == null)
         {
-            if (carrier == null)
-            {
-                OpenTelemetryApiEventSource.Log.FailedToInjectBaggage(nameof(BaggagePropagator), "null carrier");
-                return;
-            }
-
-            if (setter == null)
-            {
-                OpenTelemetryApiEventSource.Log.FailedToInjectBaggage(nameof(BaggagePropagator), "null setter");
-                return;
-            }
-
-            using var e = context.Baggage.GetEnumerator();
-
-            if (e.MoveNext() == true)
-            {
-                int itemCount = 0;
-                StringBuilder baggage = new StringBuilder();
-                do
-                {
-                    KeyValuePair<string, string> item = e.Current;
-                    if (string.IsNullOrEmpty(item.Value))
-                    {
-                        continue;
-                    }
-
-                    baggage.Append(WebUtility.UrlEncode(item.Key)).Append('=').Append(WebUtility.UrlEncode(item.Value)).Append(',');
-                }
-                while (e.MoveNext() && ++itemCount < MaxBaggageItems && baggage.Length < MaxBaggageLength);
-                baggage.Remove(baggage.Length - 1, 1);
-                setter(carrier, BaggageHeaderName, baggage.ToString());
-            }
+            OpenTelemetryApiEventSource.Log.FailedToExtractBaggage(nameof(BaggagePropagator), "null carrier");
+            return context;
         }
 
-        internal static bool TryExtractBaggage(string[] baggageCollection, out Dictionary<string, string> baggage)
+        if (getter == null)
         {
-            int baggageLength = -1;
-            bool done = false;
-            Dictionary<string, string> baggageDictionary = null;
+            OpenTelemetryApiEventSource.Log.FailedToExtractBaggage(nameof(BaggagePropagator), "null getter");
+            return context;
+        }
 
-            foreach (var item in baggageCollection)
+        try
+        {
+            var baggageCollection = getter(carrier, BaggageHeaderName);
+            if (baggageCollection is not null)
             {
-                if (done)
+                if (TryExtractBaggage(baggageCollection, out var baggageItems))
                 {
-                    break;
-                }
+                    Baggage baggage =
+#if NET
+                        new(baggageItems);
+#else
+                        new(baggageItems!);
+#endif
 
-                if (string.IsNullOrEmpty(item))
+                    return new PropagationContext(context.ActivityContext, baggage);
+                }
+            }
+
+            return new PropagationContext(context.ActivityContext, context.Baggage);
+        }
+        catch (Exception ex)
+        {
+            OpenTelemetryApiEventSource.Log.BaggageExtractException(nameof(BaggagePropagator), ex);
+        }
+
+        return context;
+    }
+
+    /// <inheritdoc/>
+    public override void Inject<T>(PropagationContext context, T carrier, Action<T, string, string> setter)
+    {
+        if (carrier == null)
+        {
+            OpenTelemetryApiEventSource.Log.FailedToInjectBaggage(nameof(BaggagePropagator), "null carrier");
+            return;
+        }
+
+        if (setter == null)
+        {
+            OpenTelemetryApiEventSource.Log.FailedToInjectBaggage(nameof(BaggagePropagator), "null setter");
+            return;
+        }
+
+        using var e = context.Baggage.GetEnumerator();
+
+        if (e.MoveNext())
+        {
+            var itemCount = 0;
+
+            // Pre-size the builder to avoid repeated internal buffer growth. This
+            // value is a rough estimate (16 chars/item covers most "key=value" pairs),
+            // clamped to the maximum number of items that can be serialized.
+            var estimatedItemCount = Math.Min(context.Baggage.Count, MaxBaggageItems);
+            var estimatedCapacity = Math.Min(MaxBaggageLength, estimatedItemCount * 16);
+            var baggage = new StringBuilder(estimatedCapacity);
+
+            do
+            {
+                var item = e.Current;
+                if (item.Value == null)
                 {
                     continue;
                 }
 
-                foreach (var pair in item.Split(CommaSignSeparator))
+                if (!IsValidKey(item.Key))
                 {
-                    baggageLength += pair.Length + 1; // pair and comma
-
-                    if (baggageLength >= MaxBaggageLength || baggageDictionary?.Count >= MaxBaggageItems)
-                    {
-                        done = true;
-                        break;
-                    }
-
-                    if (pair.IndexOf('=') < 0)
-                    {
-                        continue;
-                    }
-
-                    var parts = pair.Split(EqualSignSeparator, 2);
-                    if (parts.Length != 2)
-                    {
-                        continue;
-                    }
-
-                    var key = WebUtility.UrlDecode(parts[0]);
-                    var value = WebUtility.UrlDecode(parts[1]);
-
-                    if (string.IsNullOrEmpty(key) || string.IsNullOrEmpty(value))
-                    {
-                        continue;
-                    }
-
-                    if (baggageDictionary == null)
-                    {
-                        baggageDictionary = new Dictionary<string, string>();
-                    }
-
-                    baggageDictionary[key] = value;
+                    continue;
                 }
-            }
 
-            baggage = baggageDictionary;
-            return baggageDictionary != null;
+                var encodedKey = item.Key;
+
+                // Encoding never shortens a value, so a value this long cannot fit once the key and '=' are added.
+                if (item.Value.Length >= MaxBaggageLength)
+                {
+                    break;
+                }
+
+                var encodedValue = EncodeValue(item.Value);
+                var baggageItemLength = encodedKey.Length + encodedValue.Length + 1;
+
+                if (baggage.Length > 0)
+                {
+                    baggageItemLength++;
+                }
+
+                if (baggage.Length + baggageItemLength > MaxBaggageLength)
+                {
+                    break;
+                }
+
+                if (baggage.Length > 0)
+                {
+                    baggage.Append(',');
+                }
+
+                baggage.Append(encodedKey)
+                       .Append('=')
+                       .Append(encodedValue);
+
+                itemCount++;
+            }
+            while (itemCount < MaxBaggageItems && e.MoveNext());
+
+            if (baggage.Length > 0)
+            {
+                setter(carrier, BaggageHeaderName, baggage.ToString());
+            }
         }
     }
+
+    internal static bool TryExtractBaggage(
+        IEnumerable<string> baggageCollection,
+#if NET
+        [NotNullWhen(true)]
+#endif
+        out Dictionary<string, string>? baggage)
+    {
+        var baggageLength = -1;
+        var done = false;
+        Dictionary<string, string>? baggageDictionary = null;
+
+        foreach (var item in baggageCollection)
+        {
+            if (done)
+            {
+                break;
+            }
+
+            if (string.IsNullOrEmpty(item))
+            {
+                continue;
+            }
+
+            var remaining = item.AsSpan();
+            while (!remaining.IsEmpty)
+            {
+                var pair = ReadNextSegment(ref remaining, ',');
+                baggageLength += pair.Length + 1;
+
+                if (baggageLength > MaxBaggageLength || baggageDictionary?.Count >= MaxBaggageItems)
+                {
+                    done = true;
+                    break;
+                }
+
+                var separatorIndex = pair.IndexOf('=');
+                if (separatorIndex < 0)
+                {
+                    continue;
+                }
+
+                var rawKey = pair.Slice(0, separatorIndex).Trim();
+
+                if (!IsValidKey(rawKey))
+                {
+                    continue;
+                }
+
+                var key = rawKey.ToString();
+
+                var rawValue = pair.Slice(separatorIndex + 1);
+
+                var semicolonIndex = rawValue.IndexOf(';');
+                if (semicolonIndex >= 0)
+                {
+                    rawValue = rawValue.Slice(0, semicolonIndex);
+                }
+
+                rawValue = rawValue.Trim();
+
+                var value = rawValue.IndexOf('%') < 0 ? rawValue.ToString() : Decode(rawValue);
+
+                if (string.IsNullOrEmpty(key))
+                {
+                    continue;
+                }
+
+                baggageDictionary ??= [with(StringComparer.Ordinal)];
+                baggageDictionary[key] = value;
+            }
+        }
+
+        baggage = baggageDictionary;
+        return baggageDictionary != null;
+    }
+
+    private static ReadOnlySpan<char> ReadNextSegment(ref ReadOnlySpan<char> remaining, char separator)
+    {
+        var separatorIndex = remaining.IndexOf(separator);
+        if (separatorIndex < 0)
+        {
+            var segment = remaining;
+            remaining = [];
+            return segment;
+        }
+
+        var result = remaining.Slice(0, separatorIndex);
+        remaining = remaining.Slice(separatorIndex + 1);
+        return result;
+    }
+
+    private static string EncodeValue(string value)
+    {
+#if NET
+        // Keep this check separate from the encoding so values that need no escaping stay cheap.
+        return value.AsSpan().ContainsAnyExcept(ValidValueSearcher) ? EncodeEscapedValue(value) : value;
+#else
+        var allValid = true;
+        foreach (var c in value)
+        {
+            if (c >= AsciiLimit || !ValidValueLookup[c])
+            {
+                allValid = false;
+                break;
+            }
+        }
+
+        if (allValid)
+        {
+            return value;
+        }
+
+        var sb = new StringBuilder(value.Length);
+
+        // Runs of characters that need no escaping are appended in one step rather than one character at a time.
+        var runStart = 0;
+        for (var i = 0; i < value.Length; i++)
+        {
+            var c = value[i];
+            if (c < AsciiLimit && ValidValueLookup[c])
+            {
+                continue;
+            }
+
+            sb.Append(value, runStart, i - runStart);
+
+            var codePoint = (int)c;
+            if (char.IsHighSurrogate(c) && i + 1 < value.Length && char.IsLowSurrogate(value[i + 1]))
+            {
+                // Non-BMP pair: encode both chars as one 4-byte UTF-8 sequence.
+                i++;
+                codePoint = char.ConvertToUtf32(c, value[i]);
+            }
+            else if (char.IsSurrogate(c))
+            {
+                // A lone surrogate has no UTF-8 form, so it is replaced with U+FFFD as Encoding.UTF8 does.
+                codePoint = ReplacementCharacter;
+            }
+
+            AppendPercentEncodedCodePoint(sb, codePoint);
+            runStart = i + 1;
+        }
+
+        sb.Append(value, runStart, value.Length - runStart);
+        return sb.ToString();
+#endif
+    }
+
+#if !NET
+    private static void AppendPercentEncodedCodePoint(StringBuilder sb, int codePoint)
+    {
+        if (codePoint < AsciiLimit)
+        {
+            AppendPercentEncoded(sb, (byte)codePoint);
+        }
+        else if (codePoint < 0x800)
+        {
+            AppendPercentEncoded(sb, (byte)(0xC0 | (codePoint >> 6)));
+            AppendPercentEncoded(sb, (byte)(0x80 | (codePoint & 0x3F)));
+        }
+        else if (codePoint < 0x10000)
+        {
+            AppendPercentEncoded(sb, (byte)(0xE0 | (codePoint >> 12)));
+            AppendPercentEncoded(sb, (byte)(0x80 | ((codePoint >> 6) & 0x3F)));
+            AppendPercentEncoded(sb, (byte)(0x80 | (codePoint & 0x3F)));
+        }
+        else
+        {
+            AppendPercentEncoded(sb, (byte)(0xF0 | (codePoint >> 18)));
+            AppendPercentEncoded(sb, (byte)(0x80 | ((codePoint >> 12) & 0x3F)));
+            AppendPercentEncoded(sb, (byte)(0x80 | ((codePoint >> 6) & 0x3F)));
+            AppendPercentEncoded(sb, (byte)(0x80 | (codePoint & 0x3F)));
+        }
+    }
+#endif
+
+#if NET
+    private static string EncodeEscapedValue(string value)
+    {
+        // Every escaped character is written as at most three '%XX' escapes (a UTF-8 sequence of up to 3 bytes per UTF-16
+        // character), so a buffer of nine times the length of the value is always large enough to encode it in a single pass.
+        const int StackallocCharThreshold = 512;
+        const int MaxEncodedCharsPerChar = 9;
+
+        var maxLength = checked(value.Length * MaxEncodedCharsPerChar);
+        char[]? rentedChars = null;
+
+        Span<char> buffer = maxLength <= StackallocCharThreshold
+            ? stackalloc char[StackallocCharThreshold]
+            : (rentedChars = ArrayPool<char>.Shared.Rent(maxLength));
+
+        var written = 0;
+
+        try
+        {
+            written = WriteEncodedValue(value, buffer);
+            return new(buffer.Slice(0, written));
+        }
+        finally
+        {
+            if (rentedChars != null)
+            {
+                // Baggage values may be sensitive, so do not leave them in the shared pool.
+                buffer.Slice(0, written).Clear();
+                ArrayPool<char>.Shared.Return(rentedChars);
+            }
+        }
+    }
+
+    private static int WriteEncodedValue(ReadOnlySpan<char> value, Span<char> destination)
+    {
+        var length = destination.Length;
+        Span<byte> utf8Buffer = stackalloc byte[4];
+
+        while (!value.IsEmpty)
+        {
+            var escapeIndex = value.IndexOfAnyExcept(ValidValueSearcher);
+            if (escapeIndex < 0)
+            {
+                value.CopyTo(destination);
+                destination = destination.Slice(value.Length);
+                break;
+            }
+
+            value.Slice(0, escapeIndex).CopyTo(destination);
+            destination = destination.Slice(escapeIndex);
+            value = value.Slice(escapeIndex);
+
+            // DecodeFromUtf16 returns the replacement rune for invalid UTF-16 (such as a lone surrogate).
+            Rune.DecodeFromUtf16(value, out var rune, out var charsConsumed);
+            var byteCount = rune.EncodeToUtf8(utf8Buffer);
+
+            foreach (var b in utf8Buffer.Slice(0, byteCount))
+            {
+                destination[0] = '%';
+                destination[1] = Hex[b >> 4];
+                destination[2] = Hex[b & 0xF];
+                destination = destination.Slice(3);
+            }
+
+            value = value.Slice(charsConsumed);
+        }
+
+        return length - destination.Length;
+    }
+#endif
+
+#if NET
+    private static bool IsValidKey(char c) =>
+        ValidKeySearcher.Contains(c);
+#endif
+
+    private static bool IsValidKey(ReadOnlySpan<char> key)
+    {
+#if NET
+        return !key.ContainsAnyExcept(ValidKeySearcher);
+#else
+        foreach (var c in key)
+        {
+            if (c >= AsciiLimit || !ValidKeyLookup[c])
+            {
+                return false;
+            }
+        }
+
+        return true;
+#endif
+    }
+
+#if !NET
+    private static bool[] CreateAsciiLookup(string validChars)
+    {
+        var lookup = new bool[AsciiLimit];
+
+        foreach (var ch in validChars)
+        {
+            Debug.Assert(ch < AsciiLimit, "Valid character is outside ASCII range.");
+            lookup[ch] = true;
+        }
+
+        return lookup;
+    }
+#endif
+
+    private static string Decode(ReadOnlySpan<char> value)
+    {
+#if NET
+        // The decoded value cannot contain more characters than the encoded input.
+        const int StackallocByteThreshold = 256;
+        const int StackallocCharThreshold = 128;
+
+        var bytePool = ArrayPool<byte>.Shared;
+        var charPool = ArrayPool<char>.Shared;
+
+        byte[]? rentedBytes = null;
+        char[]? rentedChars = null;
+
+        Span<byte> byteBuffer = value.Length <= StackallocByteThreshold
+            ? stackalloc byte[value.Length]
+            : (rentedBytes = bytePool.Rent(value.Length));
+
+        try
+        {
+            Span<char> charBuffer = value.Length <= StackallocCharThreshold
+                ? stackalloc char[value.Length]
+                : (rentedChars = charPool.Rent(value.Length));
+
+            var charCount = DecodeInto(value, byteBuffer, charBuffer);
+            return new(charBuffer.Slice(0, charCount));
+        }
+        finally
+        {
+            if (rentedBytes != null)
+            {
+                bytePool.Return(rentedBytes, clearArray: true);
+            }
+
+            if (rentedChars != null)
+            {
+                charPool.Return(rentedChars, clearArray: true);
+            }
+        }
+#else
+        var sb = new StringBuilder(value.Length);
+        DecodeInto(value, new byte[value.Length], sb);
+        return sb.ToString();
+#endif
+    }
+
+#if NET
+    private static int DecodeInto(ReadOnlySpan<char> value, Span<byte> byteBuffer, Span<char> charBuffer)
+    {
+        var byteCount = 0;
+        var charCount = 0;
+        var i = 0;
+
+        while (i < value.Length)
+        {
+            if (value[i] == '%')
+            {
+                if (i + 2 < value.Length && char.IsAsciiHexDigit(value[i + 1]) && char.IsAsciiHexDigit(value[i + 2]))
+                {
+                    byteBuffer[byteCount++] = (byte)((HexDigitValue(value[i + 1]) << 4) | HexDigitValue(value[i + 2]));
+                    i += 3;
+                }
+                else
+                {
+                    charCount += FlushByteBuffer(byteBuffer, ref byteCount, charBuffer.Slice(charCount));
+                    charBuffer[charCount++] = '\uFFFD';
+                    i++;
+                }
+            }
+            else
+            {
+                charCount += FlushByteBuffer(byteBuffer, ref byteCount, charBuffer.Slice(charCount));
+
+                var remaining = value.Slice(i);
+                var nextEscape = remaining.IndexOf('%');
+
+                var literal = nextEscape < 0 ? remaining : remaining.Slice(0, nextEscape);
+                literal.CopyTo(charBuffer.Slice(charCount));
+
+                charCount += literal.Length;
+                i += literal.Length;
+            }
+        }
+
+        charCount += FlushByteBuffer(byteBuffer, ref byteCount, charBuffer.Slice(charCount));
+
+        // Each '%XX' escape (3 chars) yields at most 1 byte and so at most 1 char, and every literal or
+        // replacement char consumes at least 1 input char, so the output never outgrows the input.
+        Debug.Assert(charCount <= value.Length, "The decoded value must not be longer than the encoded value.");
+
+        return charCount;
+    }
+
+    private static int FlushByteBuffer(ReadOnlySpan<byte> buffer, ref int count, Span<char> destination)
+    {
+        if (count == 0)
+        {
+            return 0;
+        }
+
+        var charsWritten = Encoding.UTF8.GetChars(buffer.Slice(0, count), destination);
+        count = 0;
+
+        return charsWritten;
+    }
+#else
+    private static void DecodeInto(ReadOnlySpan<char> value, byte[] buffer, StringBuilder sb)
+    {
+        var byteCount = 0;
+        var i = 0;
+
+        while (i < value.Length)
+        {
+            if (value[i] == '%')
+            {
+                if (i + 2 < value.Length && char.IsAsciiHexDigit(value[i + 1]) && char.IsAsciiHexDigit(value[i + 2]))
+                {
+                    buffer[byteCount++] = (byte)((HexDigitValue(value[i + 1]) << 4) | HexDigitValue(value[i + 2]));
+                    i += 3;
+                }
+                else
+                {
+                    FlushByteBuffer(sb, buffer, ref byteCount);
+                    sb.Append('\uFFFD');
+                    i++;
+                }
+            }
+            else
+            {
+                FlushByteBuffer(sb, buffer, ref byteCount);
+                sb.Append(value[i]);
+                i++;
+            }
+        }
+
+        FlushByteBuffer(sb, buffer, ref byteCount);
+    }
+
+    private static void FlushByteBuffer(StringBuilder sb, byte[] buffer, ref int count)
+    {
+        if (count == 0)
+        {
+            return;
+        }
+
+        sb.Append(Encoding.UTF8.GetString(buffer, 0, count));
+        count = 0;
+    }
+#endif
+
+    private static int HexDigitValue(char c) =>
+        c <= '9' ? c - '0' : (c & 0x0f) + 9;
+
+    private static void AppendPercentEncoded(StringBuilder sb, byte b) =>
+        sb.Append('%')
+          .Append(Hex[(b >> 4) & 0xF])
+          .Append(Hex[b & 0xF]);
 }

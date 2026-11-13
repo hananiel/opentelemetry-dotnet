@@ -1,0 +1,160 @@
+// Copyright The OpenTelemetry Authors
+// SPDX-License-Identifier: Apache-2.0
+
+using OpenTelemetry.Trace;
+
+namespace OpenTelemetry.Exporter.Zipkin.Implementation.Tests;
+
+internal sealed class RemoteEndpointPriorityTestCase
+{
+    public static TheoryData<string> TestCases
+        => [.. CreateTestCases().Select(testCase => testCase.Name!)];
+
+    public string? Name { get; private set; }
+
+    public string? ExpectedResult { get; private set; }
+
+    public Dictionary<string, object>? RemoteEndpointAttributes { get; private set; }
+
+    public static RemoteEndpointPriorityTestCase GetTestCase(string name)
+        => CreateTestCases().Single(testCase => string.Equals(testCase.Name, name, StringComparison.Ordinal));
+
+    public override string? ToString() => this.Name;
+
+    private static RemoteEndpointPriorityTestCase[] CreateTestCases() =>
+    [
+        new RemoteEndpointPriorityTestCase()
+        {
+            Name = "Rank 1: Only peer.service provided",
+            ExpectedResult = "PeerService",
+            RemoteEndpointAttributes = new Dictionary<string, object>
+            {
+                [SemanticConventions.AttributePeerService] = "PeerService",
+            },
+        },
+        new RemoteEndpointPriorityTestCase()
+        {
+            Name = "Rank 2: Only server.address provided",
+            ExpectedResult = "ServerAddress",
+            RemoteEndpointAttributes = new Dictionary<string, object>
+            {
+                [SemanticConventions.AttributeServerAddress] = "ServerAddress",
+            },
+        },
+        new RemoteEndpointPriorityTestCase()
+        {
+            Name = "Rank 3: Only net.peer.name provided",
+            ExpectedResult = "NetPeerName",
+            RemoteEndpointAttributes = new Dictionary<string, object>
+            {
+                [SemanticConventions.AttributeNetPeerName] = "NetPeerName",
+            },
+        },
+        new RemoteEndpointPriorityTestCase()
+        {
+            Name = "Rank 4: network.peer.address and network.peer.port provided",
+            ExpectedResult = "1.2.3.4:5678",
+            RemoteEndpointAttributes = new Dictionary<string, object>
+            {
+                [SemanticConventions.AttributeNetworkPeerAddress] = "1.2.3.4",
+                [SemanticConventions.AttributeNetworkPeerPort] = "5678",
+            },
+        },
+        new RemoteEndpointPriorityTestCase()
+        {
+            Name = "Rank 4: Only network.peer.address provided",
+            ExpectedResult = "1.2.3.4",
+            RemoteEndpointAttributes = new Dictionary<string, object>
+            {
+                [SemanticConventions.AttributeNetworkPeerAddress] = "1.2.3.4",
+            },
+        },
+        new RemoteEndpointPriorityTestCase()
+        {
+            Name = "Rank 5: Only server.socket.domain provided",
+            ExpectedResult = "SocketDomain",
+            RemoteEndpointAttributes = new Dictionary<string, object>
+            {
+                [SemanticConventions.AttributeServerSocketDomain] = "SocketDomain",
+            },
+        },
+        new RemoteEndpointPriorityTestCase()
+        {
+            Name = "Rank 6: server.socket.address and server.socket.port provided",
+            ExpectedResult = "SocketAddress:4321",
+            RemoteEndpointAttributes = new Dictionary<string, object>
+            {
+                [SemanticConventions.AttributeServerSocketAddress] = "SocketAddress",
+                [SemanticConventions.AttributeServerSocketPort] = "4321",
+            },
+        },
+        new RemoteEndpointPriorityTestCase()
+        {
+            Name = "Rank 7: Only net.sock.peer.name provided",
+            ExpectedResult = "NetSockPeerName",
+            RemoteEndpointAttributes = new Dictionary<string, object>
+            {
+                [SemanticConventions.AttributeNetSockPeerName] = "NetSockPeerName",
+            },
+        },
+        new RemoteEndpointPriorityTestCase()
+        {
+            Name = "Rank 8: net.sock.peer.addr and net.sock.peer.port provided",
+            ExpectedResult = "5.6.7.8:8765",
+            RemoteEndpointAttributes = new Dictionary<string, object>
+            {
+                [SemanticConventions.AttributeNetSockPeerAddr] = "5.6.7.8",
+                [SemanticConventions.AttributeNetSockPeerPort] = "8765",
+            },
+        },
+        new RemoteEndpointPriorityTestCase()
+        {
+            Name = "Rank 9: Only peer.hostname provided",
+            ExpectedResult = "PeerHostname",
+            RemoteEndpointAttributes = new Dictionary<string, object>
+            {
+                [SemanticConventions.AttributePeerHostname] = "PeerHostname",
+            },
+        },
+        new RemoteEndpointPriorityTestCase()
+        {
+            Name = "Rank 10: Only peer.address provided",
+            ExpectedResult = "PeerAddress",
+            RemoteEndpointAttributes = new Dictionary<string, object>
+            {
+                [SemanticConventions.AttributePeerAddress] = "PeerAddress",
+            },
+        },
+        new RemoteEndpointPriorityTestCase()
+        {
+            Name = "Rank 11: Only db.name provided",
+            ExpectedResult = "DbName",
+            RemoteEndpointAttributes = new Dictionary<string, object>
+            {
+                [SemanticConventions.AttributeDbName] = "DbName",
+            },
+        },
+        new RemoteEndpointPriorityTestCase()
+        {
+            Name = "Multiple attributes: highest rank wins",
+            ExpectedResult = "PeerService",
+            RemoteEndpointAttributes = new Dictionary<string, object>
+            {
+                [SemanticConventions.AttributeDbName] = "DbName",
+                [SemanticConventions.AttributePeerAddress] = "PeerAddress",
+                [SemanticConventions.AttributePeerHostname] = "PeerHostname",
+                [SemanticConventions.AttributeNetSockPeerAddr] = "5.6.7.8",
+                [SemanticConventions.AttributeNetSockPeerPort] = "8765",
+                [SemanticConventions.AttributeNetSockPeerName] = "NetSockPeerName",
+                [SemanticConventions.AttributeServerSocketAddress] = "SocketAddress",
+                [SemanticConventions.AttributeServerSocketPort] = "4321",
+                [SemanticConventions.AttributeServerSocketDomain] = "SocketDomain",
+                [SemanticConventions.AttributeNetworkPeerAddress] = "1.2.3.4",
+                [SemanticConventions.AttributeNetworkPeerPort] = "5678",
+                [SemanticConventions.AttributeNetPeerName] = "NetPeerName",
+                [SemanticConventions.AttributeServerAddress] = "ServerAddress",
+                [SemanticConventions.AttributePeerService] = "PeerService",
+            },
+        },
+    ];
+}

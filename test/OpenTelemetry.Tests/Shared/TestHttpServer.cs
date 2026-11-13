@@ -1,111 +1,135 @@
-// <copyright file="TestHttpServer.cs" company="OpenTelemetry Authors">
 // Copyright The OpenTelemetry Authors
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//     http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
-// </copyright>
-using System;
+// SPDX-License-Identifier: Apache-2.0
+
 using System.Net;
-using System.Threading;
-using System.Threading.Tasks;
 
-namespace OpenTelemetry.Tests
+namespace OpenTelemetry.Tests;
+
+internal static class TestHttpServer
 {
-    internal class TestHttpServer
+    public static IDisposable RunServer(Action<HttpListenerContext> action, out string host, out int port)
     {
-        private static readonly Random GlobalRandom = new();
+        host = "localhost";
+        port = 0;
+        RunningServer? server = null;
 
-        public static IDisposable RunServer(Action<HttpListenerContext> action, out string host, out int port)
+        var retryCount = 5;
+        var remainingAttempts = retryCount;
+
+        while (remainingAttempts > 0)
         {
-            host = "localhost";
-            port = 0;
-            RunningServer server = null;
-
-            var retryCount = 5;
-            while (retryCount > 0)
+            try
             {
-                try
-                {
-                    port = GlobalRandom.Next(2000, 5000);
-                    server = new RunningServer(action, host, port);
-                    server.Start();
-                    break;
-                }
-                catch (HttpListenerException)
-                {
-                    retryCount--;
-                }
+                port = TcpPortProvider.GetOpenPort();
+                server = new RunningServer(action, host, port);
+                server.Start();
+                break;
             }
-
-            return server;
+            catch (HttpListenerException)
+            {
+                server?.Dispose();
+                server = null;
+                remainingAttempts--;
+            }
         }
 
-        private class RunningServer : IDisposable
+        return server ?? throw new InvalidOperationException($"Server could not be started within {retryCount} attempts.");
+    }
+
+    private sealed class RunningServer : IDisposable
+    {
+        private readonly Task httpListenerTask;
+        private readonly HttpListener listener;
+        private readonly AutoResetEvent initialized = new(false);
+#if NET9_0_OR_GREATER
+        private readonly Lock syncRoot = new();
+#else
+        // Not the OpenTelemetry.Lock shim, as this file is linked into projects that see
+        // more than one copy of it through InternalsVisibleTo, which makes it ambiguous.
+        private readonly object syncRoot = new();
+#endif
+
+        private volatile bool disposing;
+
+        public RunningServer(Action<HttpListenerContext> action, string host, int port)
         {
-            private readonly Task httpListenerTask;
-            private readonly HttpListener listener;
-            private readonly AutoResetEvent initialized = new(false);
+            this.listener = new HttpListener();
 
-            public RunningServer(Action<HttpListenerContext> action, string host, int port)
+            this.listener.Prefixes.Add($"http://{host}:{port}/");
+            this.listener.Start();
+
+            this.httpListenerTask = this.RunAsync(action);
+        }
+
+        public void Start()
+            => this.initialized.WaitOne();
+
+        public void Dispose()
+        {
+            try
             {
-                this.listener = new HttpListener();
-
-                this.listener.Prefixes.Add($"http://{host}:{port}/");
-                this.listener.Start();
-
-                this.httpListenerTask = new Task(async () =>
+                lock (this.syncRoot)
                 {
-                    while (true)
-                    {
-                        try
-                        {
-                            var ctxTask = this.listener.GetContextAsync();
+                    this.disposing = true;
+                }
 
-                            this.initialized.Set();
-
-                            action(await ctxTask.ConfigureAwait(false));
-                        }
-                        catch (Exception ex)
-                        {
-                            if (ex is ObjectDisposedException
-                                || (ex is HttpListenerException httpEx && httpEx.ErrorCode == 995))
-                            {
-                                // Listener was closed before we got into GetContextAsync or
-                                // Listener was closed while we were in GetContextAsync.
-                                break;
-                            }
-
-                            throw;
-                        }
-                    }
-                });
+                this.listener.Close();
+                this.httpListenerTask?.Wait();
+                this.initialized.Dispose();
             }
-
-            public void Start()
+            catch (ObjectDisposedException)
             {
-                this.httpListenerTask.Start();
-                this.initialized.WaitOne();
+                // swallow this exception just in case
             }
+        }
 
-            public void Dispose()
+        private async Task RunAsync(Action<HttpListenerContext> action)
+        {
+            while (true)
             {
                 try
                 {
-                    this.listener.Close();
-                    this.httpListenerTask?.Wait();
+                    Task<HttpListenerContext> ctxTask;
+
+                    // Workaround for https://github.com/dotnet/runtime/issues/136293.
+                    // The managed HttpListener used on Linux and macOS has a race: Close() drains the
+                    // queue of pending GetContextAsync() calls before it marks the listener as closed,
+                    // so a call that slips in between is queued but never completed, and Dispose()
+                    // would then wait for this loop forever. Holding the lock while checking `disposing`
+                    // and calling GetContextAsync() means the call is either queued before Close() runs
+                    // (so Close() completes it) or not made at all.
+                    lock (this.syncRoot)
+                    {
+                        if (this.disposing)
+                        {
+                            return;
+                        }
+
+                        ctxTask = this.listener.GetContextAsync();
+                    }
+
+                    this.initialized.Set();
+
+#pragma warning disable CA2007 // Do not directly await a Task
+                    action(await ctxTask);
+#pragma warning disable CA2007 // Do not directly await a Task
                 }
-                catch (ObjectDisposedException)
+                catch (Exception) when (this.disposing)
                 {
-                    // swallow this exception just in case
+                    // The listener was closed before we got into GetContextAsync, or while we
+                    // were in it, or between handling a request and re-entering it. What that
+                    // throws is platform- and timing-dependent: observed variants include
+                    // ObjectDisposedException, HttpListenerException with a Win32 error of 995
+                    // (ERROR_OPERATION_ABORTED) on .NET or 1 (ERROR_INVALID_FUNCTION) on .NET
+                    // Framework, InvalidOperationException because the listener is no longer
+                    // started, and even ApplicationException wrapping E_HANDLE if Close() races
+                    // with (Begin/End)GetContextAsync binding the listener's OS handle to the
+                    // I/O completion port. Rather than growing this list of exception types
+                    // every time CI finds a new one, key off `disposing` alone: once Dispose()
+                    // has asked the listener to stop (set before it calls Close(), so this can't
+                    // race with that call the way checking `listener.IsListening` did), any
+                    // exception from this loop is expected shutdown noise, not a real failure.
+                    return;
                 }
             }
         }

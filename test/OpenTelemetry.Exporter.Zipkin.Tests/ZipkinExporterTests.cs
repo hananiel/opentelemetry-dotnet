@@ -1,467 +1,571 @@
-// <copyright file="ZipkinExporterTests.cs" company="OpenTelemetry Authors">
 // Copyright The OpenTelemetry Authors
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//     http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
-// </copyright>
+// SPDX-License-Identifier: Apache-2.0
 
-using System;
 using System.Collections.Concurrent;
-using System.Collections.Generic;
 using System.Diagnostics;
-using System.IO;
-using System.Linq;
+using System.Diagnostics.Tracing;
+using System.Globalization;
 using System.Net;
+#if NETFRAMEWORK
 using System.Net.Http;
+#endif
 using System.Text;
+using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using OpenTelemetry.Exporter.Zipkin.Implementation;
 using OpenTelemetry.Resources;
 using OpenTelemetry.Tests;
 using OpenTelemetry.Trace;
-using Xunit;
 
-namespace OpenTelemetry.Exporter.Zipkin.Tests
+namespace OpenTelemetry.Exporter.Zipkin.Tests;
+
+[Collection(EnvVarsCollectionDefinition.Name)]
+public sealed class ZipkinExporterTests : IDisposable
 {
-    public class ZipkinExporterTests : IDisposable
+    private const string TraceId = "e8ea7e9ac72de94e91fabc613f9686b2";
+    private static readonly ConcurrentDictionary<Guid, string> Responses = new();
+
+    private readonly IDisposable testServer;
+    private readonly string testServerHost;
+    private readonly int testServerPort;
+
+    static ZipkinExporterTests()
     {
-        private const string TraceId = "e8ea7e9ac72de94e91fabc613f9686b2";
-        private static readonly ConcurrentDictionary<Guid, string> Responses = new();
+        Activity.DefaultIdFormat = ActivityIdFormat.W3C;
+        Activity.ForceDefaultIdFormat = true;
+    }
 
-        private readonly IDisposable testServer;
-        private readonly string testServerHost;
-        private readonly int testServerPort;
+    public ZipkinExporterTests()
+    {
+        this.testServer = TestHttpServer.RunServer(
+            ProcessServerRequest,
+            out this.testServerHost,
+            out this.testServerPort);
 
-        static ZipkinExporterTests()
+        static void ProcessServerRequest(HttpListenerContext context)
         {
-            Activity.DefaultIdFormat = ActivityIdFormat.W3C;
-            Activity.ForceDefaultIdFormat = true;
+            context.Response.StatusCode = 200;
 
-            var listener = new ActivityListener
+            using StreamReader readStream = new(context.Request.InputStream);
+
+            var requestContent = readStream.ReadToEnd();
+
+            Responses.TryAdd(
+                Guid.Parse(context.Request.QueryString["requestId"]!),
+                requestContent);
+
+            context.Response.OutputStream.Close();
+        }
+    }
+
+    public void Dispose()
+        => this.testServer.Dispose();
+
+    [Fact]
+    public void AddAddZipkinExporterNamedOptionsSupported()
+    {
+        var defaultExporterOptionsConfigureOptionsInvocations = 0;
+        var namedExporterOptionsConfigureOptionsInvocations = 0;
+
+        using var tracerProvider = Sdk.CreateTracerProviderBuilder()
+            .ConfigureServices(services =>
             {
-                ShouldListenTo = _ => true,
-                Sample = (ref ActivityCreationOptions<ActivityContext> options) => ActivitySamplingResult.AllData,
+                services.Configure<ZipkinExporterOptions>(o => defaultExporterOptionsConfigureOptionsInvocations++);
+
+                services.Configure<ZipkinExporterOptions>("Exporter2", o => namedExporterOptionsConfigureOptionsInvocations++);
+            })
+            .AddZipkinExporter()
+            .AddZipkinExporter("Exporter2", o => { })
+            .Build();
+
+        Assert.Equal(1, defaultExporterOptionsConfigureOptionsInvocations);
+        Assert.Equal(1, namedExporterOptionsConfigureOptionsInvocations);
+    }
+
+    [Fact]
+    public void BadArgs()
+    {
+        TracerProviderBuilder? builder = null;
+        Assert.Throws<ArgumentNullException>(() => builder!.AddZipkinExporter());
+    }
+
+    [Fact]
+    public void SuppressesInstrumentation()
+    {
+        const string activitySourceName = "zipkin.test";
+        var requestId = Guid.NewGuid();
+#pragma warning disable CA2000 // Dispose objects before losing scope
+        TestActivityProcessor testActivityProcessor = new();
+#pragma warning restore CA2000 // Dispose objects before losing scope
+
+        var endCalledCount = 0;
+
+        testActivityProcessor.EndAction =
+            (a) =>
+            {
+                endCalledCount++;
             };
 
-            ActivitySource.AddActivityListener(listener);
-        }
-
-        public ZipkinExporterTests()
+        var exporterOptions = new ZipkinExporterOptions
         {
-            this.testServer = TestHttpServer.RunServer(
-                ctx => ProcessServerRequest(ctx),
-                out this.testServerHost,
-                out this.testServerPort);
+            Endpoint = new($"http://{this.testServerHost}:{this.testServerPort}/api/v2/spans?requestId={requestId}"),
+        };
+        using var zipkinExporter = new ZipkinExporter(exporterOptions);
+        using var exportActivityProcessor = new BatchActivityExportProcessor(zipkinExporter);
 
-            static void ProcessServerRequest(HttpListenerContext context)
-            {
-                context.Response.StatusCode = 200;
+        using var tracerProvider = Sdk.CreateTracerProviderBuilder()
+            .AddSource(activitySourceName)
+            .AddProcessor(testActivityProcessor)
+            .AddProcessor(exportActivityProcessor)
+            .AddHttpClientInstrumentation()
+            .Build();
 
-                using StreamReader readStream = new StreamReader(context.Request.InputStream);
+        using var source = new ActivitySource(activitySourceName);
+        using var activity = source.StartActivity("Test Zipkin Activity");
+        activity?.Stop();
 
-                string requestContent = readStream.ReadToEnd();
+        // We call ForceFlush on the exporter twice, so that in the event
+        // of a regression, this should give any operations performed in
+        // the Zipkin exporter itself enough time to be instrumented and
+        // loop back through the exporter.
+        exportActivityProcessor.ForceFlush();
+        exportActivityProcessor.ForceFlush();
 
-                Responses.TryAdd(
-                    Guid.Parse(context.Request.QueryString["requestId"]),
-                    requestContent);
+        Assert.Equal(1, endCalledCount);
+    }
 
-                context.Response.OutputStream.Close();
-            }
-        }
-
-        public void Dispose()
+    [Fact]
+    public void EndpointConfigurationUsingEnvironmentVariable()
+    {
+        try
         {
-            this.testServer.Dispose();
+            Environment.SetEnvironmentVariable(ZipkinExporterOptions.ZipkinEndpointEnvVar, "http://urifromenvironmentvariable");
+
+            var exporterOptions = new ZipkinExporterOptions();
+
+            Assert.Equal(new Uri(Environment.GetEnvironmentVariable(ZipkinExporterOptions.ZipkinEndpointEnvVar)!).AbsoluteUri, exporterOptions.Endpoint.AbsoluteUri);
         }
-
-        [Fact]
-        public void BadArgs()
+        finally
         {
-            TracerProviderBuilder builder = null;
-            Assert.Throws<ArgumentNullException>(() => builder.AddZipkinExporter());
+            Environment.SetEnvironmentVariable(ZipkinExporterOptions.ZipkinEndpointEnvVar, null);
         }
+    }
 
-        [Fact]
-        public void SuppresssesInstrumentation()
+    [Fact]
+    public void IncodeEndpointConfigTakesPrecedenceOverEnvironmentVariable()
+    {
+        try
         {
-            const string ActivitySourceName = "zipkin.test";
-            Guid requestId = Guid.NewGuid();
-            TestActivityProcessor testActivityProcessor = new TestActivityProcessor();
-
-            int endCalledCount = 0;
-
-            testActivityProcessor.EndAction =
-                (a) =>
-                {
-                    endCalledCount++;
-                };
+            Environment.SetEnvironmentVariable(ZipkinExporterOptions.ZipkinEndpointEnvVar, "http://urifromenvironmentvariable");
 
             var exporterOptions = new ZipkinExporterOptions
             {
-                Endpoint = new Uri($"http://{this.testServerHost}:{this.testServerPort}/api/v2/spans?requestId={requestId}"),
-            };
-            var zipkinExporter = new ZipkinExporter(exporterOptions);
-            var exportActivityProcessor = new BatchActivityExportProcessor(zipkinExporter);
-
-            var tracerProvider = Sdk.CreateTracerProviderBuilder()
-                .AddSource(ActivitySourceName)
-                .AddProcessor(testActivityProcessor)
-                .AddProcessor(exportActivityProcessor)
-                .AddHttpClientInstrumentation()
-                .Build();
-
-            var source = new ActivitySource(ActivitySourceName);
-            var activity = source.StartActivity("Test Zipkin Activity");
-            activity?.Stop();
-
-            // We call ForceFlush on the exporter twice, so that in the event
-            // of a regression, this should give any operations performed in
-            // the Zipkin exporter itself enough time to be instrumented and
-            // loop back through the exporter.
-            exportActivityProcessor.ForceFlush();
-            exportActivityProcessor.ForceFlush();
-
-            Assert.Equal(1, endCalledCount);
-        }
-
-        [Fact]
-        public void EndpointConfigurationUsingEnvironmentVariable()
-        {
-            try
-            {
-                Environment.SetEnvironmentVariable(ZipkinExporterOptions.ZipkinEndpointEnvVar, "http://urifromenvironmentvariable");
-
-                var exporterOptions = new ZipkinExporterOptions();
-
-                Assert.Equal(new Uri(Environment.GetEnvironmentVariable(ZipkinExporterOptions.ZipkinEndpointEnvVar)).AbsoluteUri, exporterOptions.Endpoint.AbsoluteUri);
-            }
-            finally
-            {
-                Environment.SetEnvironmentVariable(ZipkinExporterOptions.ZipkinEndpointEnvVar, null);
-            }
-        }
-
-        [Fact]
-        public void IncodeEndpointConfigTakesPrecedenceOverEnvironmentVariable()
-        {
-            try
-            {
-                Environment.SetEnvironmentVariable(ZipkinExporterOptions.ZipkinEndpointEnvVar, "http://urifromenvironmentvariable");
-
-                var exporterOptions = new ZipkinExporterOptions
-                {
-                    Endpoint = new Uri("http://urifromcode"),
-                };
-
-                Assert.Equal(new Uri("http://urifromcode").AbsoluteUri, exporterOptions.Endpoint.AbsoluteUri);
-            }
-            finally
-            {
-                Environment.SetEnvironmentVariable(ZipkinExporterOptions.ZipkinEndpointEnvVar, null);
-            }
-        }
-
-        [Fact]
-        public void ErrorGettingUriFromEnvVarSetsDefaultEndpointValue()
-        {
-            try
-            {
-                Environment.SetEnvironmentVariable(ZipkinExporterOptions.ZipkinEndpointEnvVar, "InvalidUri");
-
-                Assert.Throws<FormatException>(() => new ZipkinExporterOptions());
-            }
-            finally
-            {
-                Environment.SetEnvironmentVariable(ZipkinExporterOptions.ZipkinEndpointEnvVar, null);
-            }
-        }
-
-        [Fact]
-        public void UserHttpFactoryCalled()
-        {
-            ZipkinExporterOptions options = new ZipkinExporterOptions();
-
-            var defaultFactory = options.HttpClientFactory;
-
-            int invocations = 0;
-            options.HttpClientFactory = () =>
-            {
-                invocations++;
-                return defaultFactory();
+                Endpoint = new("http://urifromcode"),
             };
 
-            using (var exporter = new ZipkinExporter(options))
-            {
-                Assert.Equal(1, invocations);
-            }
-
-            using (var provider = Sdk.CreateTracerProviderBuilder()
-                .AddZipkinExporter(o => o.HttpClientFactory = options.HttpClientFactory)
-                .Build())
-            {
-                Assert.Equal(2, invocations);
-            }
-
-            using var client = new HttpClient();
-
-            using (var exporter = new ZipkinExporter(options, client))
-            {
-                // Factory not called when client is passed as a param.
-                Assert.Equal(2, invocations);
-            }
-
-            options.HttpClientFactory = null;
-            Assert.Throws<InvalidOperationException>(() =>
-            {
-                using var exporter = new ZipkinExporter(options);
-            });
-
-            options.HttpClientFactory = () => null;
-            Assert.Throws<InvalidOperationException>(() =>
-            {
-                using var exporter = new ZipkinExporter(options);
-            });
+            Assert.Equal(new Uri("http://urifromcode").AbsoluteUri, exporterOptions.Endpoint.AbsoluteUri);
         }
-
-        [Fact]
-        public void ServiceProviderHttpClientFactoryInvoked()
+        finally
         {
-            IServiceCollection services = new ServiceCollection();
+            Environment.SetEnvironmentVariable(ZipkinExporterOptions.ZipkinEndpointEnvVar, null);
+        }
+    }
 
-            services.AddHttpClient();
+    [Fact]
+    public void ErrorGettingUriFromEnvVarSetsDefaultEndpointValue()
+    {
+        try
+        {
+            Environment.SetEnvironmentVariable(ZipkinExporterOptions.ZipkinEndpointEnvVar, "InvalidUri");
 
-            int invocations = 0;
+            var options = new ZipkinExporterOptions();
 
-            services.AddHttpClient("ZipkinExporter", configureClient: (client) => invocations++);
+            Assert.Equal(new(ZipkinExporterOptions.DefaultZipkinEndpoint), options.Endpoint);
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable(ZipkinExporterOptions.ZipkinEndpointEnvVar, null);
+        }
+    }
 
-            services.AddOpenTelemetryTracing(builder => builder.AddZipkinExporter());
+    [Fact]
+    public void InvalidEndpointValueIsNotLogged()
+    {
+        var values = new Dictionary<string, string>()
+        {
+            [ZipkinExporterOptions.ZipkinEndpointEnvVar] = "https://user:p@ssw0rd@localhost:9411/api/v2/spans",
+        };
 
-            using var serviceProvider = services.BuildServiceProvider();
+        var configuration = new ConfigurationBuilder()
+            .AddInMemoryCollection(values!)
+            .Build();
 
-            var tracerProvider = serviceProvider.GetRequiredService<TracerProvider>();
+        using var listener = new TestEventListener(ZipkinExporterEventSource.Log, EventLevel.Warning);
 
+        var options = new ZipkinExporterOptions(configuration, new());
+
+        Assert.Equal(new(ZipkinExporterOptions.DefaultZipkinEndpoint), options.Endpoint);
+
+        var invalidValueEvent = Assert.Single(listener.Messages, e => e.EventName == nameof(ZipkinExporterEventSource.InvalidConfigurationValue));
+
+        Assert.NotNull(invalidValueEvent.Payload);
+        Assert.Equal([ZipkinExporterOptions.ZipkinEndpointEnvVar, "[REDACTED]"], invalidValueEvent.Payload);
+    }
+
+    [Fact]
+    public void EndpointConfigurationUsingIConfiguration()
+    {
+        var values = new Dictionary<string, string>()
+        {
+            [ZipkinExporterOptions.ZipkinEndpointEnvVar] = "http://custom-endpoint:12345",
+        };
+
+        var configuration = new ConfigurationBuilder()
+            .AddInMemoryCollection(values!)
+            .Build();
+
+        var options = new ZipkinExporterOptions(configuration, new());
+
+        Assert.Equal(new("http://custom-endpoint:12345"), options.Endpoint);
+    }
+
+    [Fact]
+    public void UserHttpFactoryCalled()
+    {
+        ZipkinExporterOptions options = new();
+
+        var defaultFactory = options.HttpClientFactory;
+
+        var invocations = 0;
+        options.HttpClientFactory = () =>
+        {
+            invocations++;
+            return defaultFactory();
+        };
+
+        using (var exporter = new ZipkinExporter(options))
+        {
             Assert.Equal(1, invocations);
         }
 
-        [Theory]
-        [InlineData(true, false, false)]
-        [InlineData(false, false, false)]
-        [InlineData(false, true, false)]
-        [InlineData(false, false, true)]
-        [InlineData(false, false, false, StatusCode.Ok)]
-        [InlineData(false, false, false, StatusCode.Ok, null, true)]
-        [InlineData(false, false, false, StatusCode.Error)]
-        [InlineData(false, false, false, StatusCode.Error, "Error description")]
-        public void IntegrationTest(
-            bool useShortTraceIds,
-            bool useTestResource,
-            bool isRootSpan,
-            StatusCode statusCode = StatusCode.Unset,
-            string statusDescription = null,
-            bool addErrorTag = false)
+        using (var provider = Sdk.CreateTracerProviderBuilder()
+            .AddZipkinExporter(o => o.HttpClientFactory = options.HttpClientFactory)
+            .Build())
         {
-            var status = statusCode switch
-            {
-                StatusCode.Unset => Status.Unset,
-                StatusCode.Ok => Status.Ok,
-                StatusCode.Error => Status.Error,
-                _ => throw new InvalidOperationException(),
-            };
-
-            if (!string.IsNullOrEmpty(statusDescription))
-            {
-                status = status.WithDescription(statusDescription);
-            }
-
-            Guid requestId = Guid.NewGuid();
-
-            ZipkinExporter exporter = new ZipkinExporter(
-                new ZipkinExporterOptions
-                {
-                    Endpoint = new Uri($"http://{this.testServerHost}:{this.testServerPort}/api/v2/spans?requestId={requestId}"),
-                    UseShortTraceIds = useShortTraceIds,
-                });
-
-            var serviceName = (string)exporter.ParentProvider.GetDefaultResource().Attributes
-                .Where(pair => pair.Key == ResourceSemanticConventions.AttributeServiceName).FirstOrDefault().Value;
-            var resourceTags = string.Empty;
-            var activity = CreateTestActivity(isRootSpan: isRootSpan, status: status);
-            if (useTestResource)
-            {
-                serviceName = "MyService";
-
-                exporter.SetLocalEndpointFromResource(ResourceBuilder.CreateEmpty().AddAttributes(new Dictionary<string, object>
-                {
-                    [ResourceSemanticConventions.AttributeServiceName] = serviceName,
-                    ["service.tag"] = "hello world",
-                }).Build());
-            }
-            else
-            {
-                exporter.SetLocalEndpointFromResource(Resource.Empty);
-            }
-
-            if (addErrorTag)
-            {
-                activity.SetTag(ZipkinActivityConversionExtensions.ZipkinErrorFlagTagName, "This should be removed.");
-            }
-
-            var processor = new SimpleActivityExportProcessor(exporter);
-
-            processor.OnEnd(activity);
-
-            var context = activity.Context;
-
-            var timestamp = activity.StartTimeUtc.ToEpochMicroseconds();
-            var eventTimestamp = activity.Events.First().Timestamp.ToEpochMicroseconds();
-
-            StringBuilder ipInformation = new StringBuilder();
-            if (!string.IsNullOrEmpty(exporter.LocalEndpoint.Ipv4))
-            {
-                ipInformation.Append($@",""ipv4"":""{exporter.LocalEndpoint.Ipv4}""");
-            }
-
-            if (!string.IsNullOrEmpty(exporter.LocalEndpoint.Ipv6))
-            {
-                ipInformation.Append($@",""ipv6"":""{exporter.LocalEndpoint.Ipv6}""");
-            }
-
-            var parentId = isRootSpan ? string.Empty : $@"""parentId"":""{ZipkinActivityConversionExtensions.EncodeSpanId(activity.ParentSpanId)}"",";
-
-            var traceId = useShortTraceIds ? TraceId.Substring(TraceId.Length - 16, 16) : TraceId;
-
-            string statusTag;
-            string errorTag = string.Empty;
-            switch (statusCode)
-            {
-                case StatusCode.Ok:
-                    statusTag = $@"""{SpanAttributeConstants.StatusCodeKey}"":""OK"",";
-                    break;
-                case StatusCode.Unset:
-                    statusTag = string.Empty;
-                    break;
-                case StatusCode.Error:
-                    statusTag = $@"""{SpanAttributeConstants.StatusCodeKey}"":""ERROR"",";
-                    errorTag = $@"""{ZipkinActivityConversionExtensions.ZipkinErrorFlagTagName}"":""{statusDescription}"",";
-                    break;
-                default:
-                    throw new NotSupportedException();
-            }
-
-            Assert.Equal(
-                $@"[{{""traceId"":""{traceId}"",""name"":""Name"",{parentId}""id"":""{ZipkinActivityConversionExtensions.EncodeSpanId(context.SpanId)}"",""kind"":""CLIENT"",""timestamp"":{timestamp},""duration"":60000000,""localEndpoint"":{{""serviceName"":""{serviceName}""{ipInformation}}},""remoteEndpoint"":{{""serviceName"":""http://localhost:44312/""}},""annotations"":[{{""timestamp"":{eventTimestamp},""value"":""Event1""}},{{""timestamp"":{eventTimestamp},""value"":""Event2""}}],""tags"":{{{resourceTags}""stringKey"":""value"",""longKey"":""1"",""longKey2"":""1"",""doubleKey"":""1"",""doubleKey2"":""1"",""longArrayKey"":""1,2"",""boolKey"":""true"",""boolArrayKey"":""true,false"",""http.host"":""http://localhost:44312/"",{statusTag}{errorTag}""otel.library.name"":""CreateTestActivity"",""peer.service"":""http://localhost:44312/""}}}}]",
-                Responses[requestId]);
+            Assert.Equal(2, invocations);
         }
 
-        internal static Activity CreateTestActivity(
-           bool isRootSpan = false,
-           bool setAttributes = true,
-           Dictionary<string, object> additionalAttributes = null,
-           bool addEvents = true,
-           bool addLinks = true,
-           Resource resource = null,
-           ActivityKind kind = ActivityKind.Client,
-           Status? status = null)
+        using var client = new HttpClient();
+
+        using (var exporter = new ZipkinExporter(options, client))
         {
-            var startTimestamp = DateTime.UtcNow;
-            var endTimestamp = startTimestamp.AddSeconds(60);
-            var eventTimestamp = DateTime.UtcNow;
-            var traceId = ActivityTraceId.CreateFromString("e8ea7e9ac72de94e91fabc613f9686b2".AsSpan());
+            // Factory not called when client is passed as a param.
+            Assert.Equal(2, invocations);
+        }
 
-            var parentSpanId = isRootSpan ? default : ActivitySpanId.CreateFromBytes(new byte[] { 12, 23, 34, 45, 56, 67, 78, 89 });
+        options.HttpClientFactory = null!;
+        Assert.Throws<InvalidOperationException>(() =>
+        {
+            using var exporter = new ZipkinExporter(options);
+        });
 
-            var attributes = new Dictionary<string, object>
+        options.HttpClientFactory = () => null!;
+        Assert.Throws<InvalidOperationException>(() =>
+        {
+            using var exporter = new ZipkinExporter(options);
+        });
+    }
+
+    [Fact]
+    public void ServiceProviderHttpClientFactoryInvoked()
+    {
+        IServiceCollection services = new ServiceCollection();
+
+        services.AddHttpClient();
+
+        var invocations = 0;
+
+        services.AddHttpClient("ZipkinExporter", configureClient: (client) => invocations++);
+
+        services.AddOpenTelemetry().WithTracing(builder => builder
+            .AddZipkinExporter());
+
+        using var serviceProvider = services.BuildServiceProvider();
+
+        var tracerProvider = serviceProvider.GetRequiredService<TracerProvider>();
+
+        Assert.Equal(1, invocations);
+    }
+
+    [Fact]
+    public void UpdatesServiceNameFromDefaultResource()
+    {
+        using var zipkinExporter = new ZipkinExporter(new());
+
+        zipkinExporter.SetLocalEndpointFromResource(Resource.Empty);
+
+        Assert.StartsWith("unknown_service:", zipkinExporter.LocalEndpoint!.ServiceName, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void UpdatesServiceNameFromIConfiguration()
+    {
+        var tracerProviderBuilder = Sdk.CreateTracerProviderBuilder()
+            .ConfigureServices(services =>
             {
-                { "stringKey", "value" },
-                { "longKey", 1L },
-                { "longKey2", 1 },
-                { "doubleKey", 1D },
-                { "doubleKey2", 1F },
-                { "longArrayKey", new long[] { 1, 2 } },
-                { "boolKey", true },
-                { "boolArrayKey", new bool[] { true, false } },
-                { "http.host", "http://localhost:44312/" }, // simulating instrumentation tag adding http.host
-            };
-            if (additionalAttributes != null)
-            {
-                foreach (var attribute in additionalAttributes)
+                Dictionary<string, string> configuration = new()
                 {
-                    if (!attributes.ContainsKey(attribute.Key))
-                    {
-                        attributes.Add(attribute.Key, attribute.Value);
-                    }
-                }
+                    ["OTEL_SERVICE_NAME"] = "myservicename",
+                };
+
+                services.AddSingleton<IConfiguration>(
+                    new ConfigurationBuilder().AddInMemoryCollection(configuration!).Build());
+            });
+
+#pragma warning disable CA2000 // Dispose objects before losing scope
+        var zipkinExporter = new ZipkinExporter(new());
+
+        tracerProviderBuilder.AddProcessor(new BatchActivityExportProcessor(zipkinExporter));
+#pragma warning restore CA2000 // Dispose objects before losing scope
+
+        using var provider = tracerProviderBuilder.Build();
+
+        zipkinExporter.SetLocalEndpointFromResource(Resource.Empty);
+
+        Assert.Equal("myservicename", zipkinExporter.LocalEndpoint!.ServiceName);
+    }
+
+    [Fact]
+    public void ResponseBodyIsNeverReadRegardlessOfSize()
+    {
+        const long OversizedResponseBytes = 16 * 1024 * 1024;
+
+        using var testHandler = new OversizedResponseHandler(OversizedResponseBytes);
+        using var httpClient = new HttpClient(testHandler, disposeHandler: false);
+
+        using var exporter = new ZipkinExporter(
+            new ZipkinExporterOptions { Endpoint = new Uri("http://localhost:9411/api/v2/spans") },
+            httpClient);
+
+        using var activity = ZipkinActivitySource.CreateTestActivity();
+
+        var result = exporter.Export(new Batch<Activity>([activity], 1));
+
+        Assert.Equal(ExportResult.Success, result);
+        Assert.Equal(0, testHandler.BytesProduced);
+    }
+
+    [Theory]
+    [InlineData(true, false, false)]
+    [InlineData(false, false, false)]
+    [InlineData(false, true, false)]
+    [InlineData(false, false, true)]
+    [InlineData(false, false, false, ActivityStatusCode.Ok)]
+    [InlineData(false, false, false, ActivityStatusCode.Ok, null, true)]
+    [InlineData(false, false, false, ActivityStatusCode.Error)]
+    [InlineData(false, false, false, ActivityStatusCode.Error, "Error description")]
+    public void IntegrationTest(
+        bool useShortTraceIds,
+        bool useTestResource,
+        bool isRootSpan,
+        ActivityStatusCode statusCode = ActivityStatusCode.Unset,
+        string? statusDescription = null,
+        bool addErrorTag = false)
+    {
+        var requestId = Guid.NewGuid();
+
+#pragma warning disable CA2000 // Dispose objects before losing scope
+        ZipkinExporter exporter = new(
+            new()
+            {
+                Endpoint = new($"http://{this.testServerHost}:{this.testServerPort}/api/v2/spans?requestId={requestId}"),
+                UseShortTraceIds = useShortTraceIds,
+            });
+#pragma warning restore CA2000 // Dispose objects before losing scope
+
+        var serviceName = (string)exporter.ParentProvider.GetDefaultResource().Attributes.FirstOrDefault(pair => pair.Key == ResourceSemanticConventions.AttributeServiceName).Value;
+        var resourceTags = string.Empty;
+        var dateTime = DateTime.UtcNow;
+        using var activity = ZipkinActivitySource.CreateTestActivity(isRootSpan: isRootSpan, statusCode: statusCode, statusDescription: statusDescription, dateTime: dateTime);
+        if (useTestResource)
+        {
+            serviceName = "MyService";
+
+            exporter.SetLocalEndpointFromResource(ResourceBuilder.CreateEmpty().AddAttributes(new Dictionary<string, object>
+            {
+                [ResourceSemanticConventions.AttributeServiceName] = serviceName,
+                ["service.tag"] = "hello world",
+            }).Build());
+        }
+        else
+        {
+            exporter.SetLocalEndpointFromResource(Resource.Empty);
+        }
+
+        activity.SetTag(SemanticConventions.AttributePeerService, "http://localhost:44312/");
+
+        if (addErrorTag)
+        {
+            activity.SetTag(ZipkinActivityConversionExtensions.ZipkinErrorFlagTagName, "This should be removed.");
+        }
+
+        using var processor = new SimpleActivityExportProcessor(exporter);
+
+        processor.OnEnd(activity);
+
+        var context = activity.Context;
+
+        var timestamp = activity.StartTimeUtc.ToEpochMicroseconds();
+        var eventTimestamp = activity.Events.First().Timestamp.ToEpochMicroseconds();
+
+        StringBuilder ipInformation = new();
+        if (!string.IsNullOrEmpty(exporter.LocalEndpoint!.Ipv4))
+        {
+#if NET
+            ipInformation.Append(CultureInfo.InvariantCulture, $@",""ipv4"":""{exporter.LocalEndpoint.Ipv4}""");
+#else
+            ipInformation.Append($@",""ipv4"":""{exporter.LocalEndpoint.Ipv4}""");
+#endif
+        }
+
+        if (!string.IsNullOrEmpty(exporter.LocalEndpoint.Ipv6))
+        {
+#if NET
+            ipInformation.Append(CultureInfo.InvariantCulture, $@",""ipv6"":""{exporter.LocalEndpoint.Ipv6}""");
+#else
+            ipInformation.Append($@",""ipv6"":""{exporter.LocalEndpoint.Ipv6}""");
+#endif
+        }
+
+        var parentId = isRootSpan ? string.Empty : $@"""parentId"":""{ZipkinActivityConversionExtensions.EncodeSpanId(activity.ParentSpanId)}"",";
+
+        var traceId = useShortTraceIds ? TraceId.Substring(TraceId.Length - 16, 16) : TraceId;
+
+        string statusTag;
+        var errorTag = string.Empty;
+        switch (statusCode)
+        {
+            case ActivityStatusCode.Ok:
+                statusTag = $@"""{SpanAttributeConstants.StatusCodeKey}"":""OK"",";
+                break;
+            case ActivityStatusCode.Unset:
+                statusTag = string.Empty;
+                break;
+            case ActivityStatusCode.Error:
+                statusTag = $@"""{SpanAttributeConstants.StatusCodeKey}"":""ERROR"",";
+                errorTag = $@"""{ZipkinActivityConversionExtensions.ZipkinErrorFlagTagName}"":""{statusDescription}"",";
+                break;
+            default:
+                throw new NotSupportedException();
+        }
+
+        Assert.Equal(
+            $@"[{{""traceId"":""{traceId}"","
+            + @"""name"":""Name"","
+            + parentId
+            + $@"""id"":""{ZipkinActivityConversionExtensions.EncodeSpanId(context.SpanId)}"","
+            + @"""kind"":""CLIENT"","
+            + $@"""timestamp"":{timestamp},"
+            + @"""duration"":60000000,"
+            + $@"""localEndpoint"":{{""serviceName"":""{serviceName}""{ipInformation}}},"
+            + @"""remoteEndpoint"":{""serviceName"":""http://localhost:44312/""},"
+            + $@"""annotations"":[{{""timestamp"":{eventTimestamp},""value"":""Event1""}},{{""timestamp"":{eventTimestamp},""value"":""Event2""}}],"
+            + @"""tags"":{"
+                + resourceTags
+                + $@"""stringKey"":""value"","
+                + @"""longKey"":""1"","
+                + @"""longKey2"":""1"","
+                + @"""doubleKey"":""1"","
+                + @"""doubleKey2"":""1"","
+                + @"""longArrayKey"":""[1,2]"","
+                + @"""boolKey"":""true"","
+                + @"""boolArrayKey"":""[true,false]"","
+                + @"""http.host"":""http://localhost:44312/"","
+                + $@"""dateTimeKey"":""{Convert.ToString(dateTime, CultureInfo.InvariantCulture)}"","
+                + $@"""dateTimeArrayKey"":""[\u0022{Convert.ToString(dateTime, CultureInfo.InvariantCulture)}\u0022]"","
+                + $@"""peer.service"":""http://localhost:44312/"","
+                + statusTag
+                + errorTag
+                + @"""otel.scope.name"":""ZipkinActivitySource"","
+                + @"""otel.library.name"":""ZipkinActivitySource"""
+            + "}}]",
+            Responses[requestId]);
+    }
+
+    private sealed class OversizedResponseHandler(long totalBytes) : HttpMessageHandler
+    {
+        private readonly GeneratedStream stream = new(totalBytes);
+
+        public long BytesProduced => this.stream.BytesProduced;
+
+        protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
+            => Task.FromResult(this.CreateResponse(request));
+
+#if NET
+        protected override HttpResponseMessage Send(HttpRequestMessage request, CancellationToken cancellationToken)
+            => this.CreateResponse(request);
+#endif
+
+        protected override void Dispose(bool disposing)
+        {
+            if (disposing)
+            {
+                this.stream.Dispose();
             }
 
-            var events = new List<ActivityEvent>
+            base.Dispose(disposing);
+        }
+
+        private HttpResponseMessage CreateResponse(HttpRequestMessage request) =>
+            new(HttpStatusCode.OK)
             {
-                new ActivityEvent(
-                    "Event1",
-                    eventTimestamp,
-                    new ActivityTagsCollection(new Dictionary<string, object>
-                    {
-                        { "key", "value" },
-                    })),
-                new ActivityEvent(
-                    "Event2",
-                    eventTimestamp,
-                    new ActivityTagsCollection(new Dictionary<string, object>
-                    {
-                        { "key", "value" },
-                    })),
+                RequestMessage = request,
+                Content = new StreamContent(this.stream),
             };
 
-            var linkedSpanId = ActivitySpanId.CreateFromString("888915b6286b9c41".AsSpan());
+        private sealed class GeneratedStream(long totalBytes) : Stream
+        {
+            public long BytesProduced { get; private set; }
 
-            var activitySource = new ActivitySource(nameof(CreateTestActivity));
+            public override bool CanRead => true;
 
-            var tags = setAttributes ?
-                    attributes.Select(kvp => new KeyValuePair<string, object>(kvp.Key, kvp.Value))
-                    : null;
-            var links = addLinks ?
-                    new[]
-                    {
-                        new ActivityLink(new ActivityContext(
-                            traceId,
-                            linkedSpanId,
-                            ActivityTraceFlags.Recorded)),
-                    }
-                    : null;
+            public override bool CanSeek => false;
 
-            var activity = activitySource.StartActivity(
-                "Name",
-                kind,
-                parentContext: new ActivityContext(traceId, parentSpanId, ActivityTraceFlags.Recorded),
-                tags,
-                links,
-                startTime: startTimestamp);
+            public override bool CanWrite => false;
 
-            if (addEvents)
+            public override long Length => throw new NotSupportedException();
+
+            public override long Position
             {
-                foreach (var evnt in events)
+                get => throw new NotSupportedException();
+                set => throw new NotSupportedException();
+            }
+
+            public override int Read(byte[] buffer, int offset, int count)
+            {
+                var remaining = totalBytes - this.BytesProduced;
+                if (remaining <= 0)
                 {
-                    activity.AddEvent(evnt);
+                    return 0;
                 }
+
+                var read = (int)Math.Min(count, remaining);
+                Array.Clear(buffer, offset, read);
+                this.BytesProduced += read;
+
+                return read;
             }
 
-            if (status.HasValue)
+            public override void Flush()
             {
-                activity.SetStatus(status.Value);
+                // No-op
             }
 
-            activity.SetEndTime(endTimestamp);
-            activity.Stop();
+            public override long Seek(long offset, SeekOrigin origin) => throw new NotSupportedException();
 
-            return activity;
+            public override void SetLength(long value) => throw new NotSupportedException();
+
+            public override void Write(byte[] buffer, int offset, int count) => throw new NotSupportedException();
         }
     }
 }

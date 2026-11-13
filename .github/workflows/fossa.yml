@@ -1,0 +1,21 @@
+name: FOSSA scanning
+
+on:
+  push:
+    branches:
+      - main
+
+permissions: {}
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  fossa:
+    name: Run FOSSA scan
+    permissions:
+      contents: read
+    uses: open-telemetry/shared-workflows/.github/workflows/fossa.yml@efc55838c9769c5476e0a5cf7183a8c5b4ae70a5 # v0.24.0
+    secrets:
+      FOSSA_API_KEY: ${{ secrets.FOSSA_API_KEY }}

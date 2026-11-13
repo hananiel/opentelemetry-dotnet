@@ -3,6 +3,7 @@
 * [Building your own exporter](#exporter)
 * [Building your own processor](#processor)
 * [Building your own sampler](#sampler)
+* [Building your own resource detector](../../resources/README.md#resource-detector)
 * [References](#references)
 
 ## Exporter
@@ -11,6 +12,7 @@ OpenTelemetry .NET SDK has provided the following built-in log exporters:
 
 * [InMemory](../../../src/OpenTelemetry.Exporter.InMemory/README.md)
 * [Console](../../../src/OpenTelemetry.Exporter.Console/README.md)
+* [OpenTelemetryProtocol](../../../src/OpenTelemetry.Exporter.OpenTelemetryProtocol/README.md)
 
 Custom exporters can be implemented to send telemetry data to places which are
 not covered by the built-in exporters:
@@ -21,7 +23,6 @@ not covered by the built-in exporters:
 * Exporters can optionally implement the `OnForceFlush` and `OnShutdown` method.
 * Depending on user's choice and load on the application, `Export` may get
   called with one or more log records.
-* Exporters will only receive sampled-in log records.
 * Exporters should not throw exceptions from `Export`, `OnForceFlush` and
   `OnShutdown`.
 * Exporters should not modify log records they receive (the same log records may
@@ -78,14 +79,43 @@ Custom processors can be implemented to cover more scenarios:
 ```csharp
 class MyProcessor : BaseProcessor<LogRecord>
 {
-    public override void OnEnd(LogRecord record)
+    public override void OnEnd(LogRecord data)
     {
-        Console.WriteLine($"OnEnd: {record}");
+        Console.WriteLine($"OnEnd: {data}");
     }
 }
 ```
 
 A demo processor is shown [here](./MyProcessor.cs).
+
+### Filtering Processor
+
+Another common use case of writing a custom processor is to filter log records
+from being exported. Unlike `Activity`, `LogRecord` does not have a `Recorded`
+flag which exporting processors check to skip telemetry, so a
+"FilteringProcessor" can be written by deriving from
+`BatchLogRecordExportProcessor` or `SimpleLogRecordExportProcessor` and only
+calling `base.OnEnd` for the log records which should be exported. An example
+filtering processor is shown [here](./MyFilteringProcessor.cs).
+
+A filtering processor like this is registered in place of the export
+processor it derives from:
+
+```csharp
+var loggerFactory = LoggerFactory.Create(builder =>
+{
+    builder.AddOpenTelemetry(options =>
+    {
+        options.AddProcessor(new MyFilteringProcessor(new MyExporter(), logRecord => true));
+    });
+});
+```
+
+> [!NOTE]
+> A filtering processor wraps an exporter directly, so it must be registered
+> manually using `AddProcessor` (as shown above). The `Add*Exporter` extension
+> methods shipped from this repo register their own exporting processor and
+> cannot be combined with a filtering processor.
 
 ## Sampler
 
